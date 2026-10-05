@@ -6,14 +6,17 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/SMbyM/tutoring-bot/actions"
 	"github.com/SMbyM/tutoring-bot/core"
 	"github.com/SMbyM/tutoring-bot/domain"
 	"github.com/SMbyM/tutoring-bot/msg"
 )
 
-func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
-	switch p.Name {
-	case "at", "atu", "atp", "atpr", "ainv", "apr", "abp", "aptg", "apadd", "afb", "fwd", "alc", "asub", "asubadd":
+func (e *Engine) adminAction(r *req, act actions.Action) (bool, error) {
+	switch act.(type) {
+	case actions.AdminTutors, actions.AdminTutor, actions.AskTutorPrice, actions.ResetTutorPrice, actions.InviteTutor,
+		actions.Prices, actions.AskBasePrice, actions.ToggleProduct, actions.AskProduct, actions.FeedbackList,
+		actions.ForwardFeedback, actions.LateCancels, actions.Subjects, actions.AskSubject:
 	default:
 		return false, nil
 	}
@@ -22,18 +25,18 @@ func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
 		return true, domain.ErrNotAllowed
 	}
 	ctx, u := r.ctx, r.u
-	back := msg.Row(msg.Btn("⬅️ Назад", "home"))
-	switch p.Name {
-	case "at":
+	back := msg.Row(msg.Btn("⬅️ Назад", actions.Home{}))
+	switch a := act.(type) {
+	case actions.AdminTutors:
 		ts, err := e.App.Tutors(ctx, u)
 		if err != nil {
 			return true, err
 		}
 		var rows [][]msg.Button
 		for _, t := range ts {
-			rows = append(rows, msg.Row(msg.Btn(t.Name, "atu", t.ID)))
+			rows = append(rows, msg.Row(msg.Btn(t.Name, actions.AdminTutor{TutorID: t.ID})))
 		}
-		rows = append(rows, msg.Row(msg.Btn("➕ Пригласить репетитора", "ainv")), back)
+		rows = append(rows, msg.Row(msg.Btn("➕ Пригласить репетитора", actions.InviteTutor{})), back)
 		text := "👩‍🏫 Репетиторы"
 		if len(ts) == 0 {
 			text += "\n\nПока никого. Пригласите репетитора ссылкой."
@@ -41,23 +44,23 @@ func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
 		r.screen(text, rows...)
 		return true, nil
 
-	case "atu":
-		return true, e.adminTutorCard(r, p.Int(0))
+	case actions.AdminTutor:
+		return true, e.adminTutorCard(r, a.TutorID)
 
-	case "atp":
-		if err := e.S.SetState(ctx, u.ID, "aprice", map[string]string{"tutor": strconv.FormatInt(p.Int(0), 10)}); err != nil {
+	case actions.AskTutorPrice:
+		if err := e.S.SetState(ctx, u.ID, "aprice", map[string]string{"tutor": strconv.FormatInt(a.TutorID, 10)}); err != nil {
 			return true, err
 		}
 		r.screen("Введите цену одного урока этого репетитора в рублях, например 1800.")
 		return true, nil
 
-	case "atpr":
-		if err := e.App.SetTutorPrice(ctx, u, p.Int(0), nil); err != nil {
+	case actions.ResetTutorPrice:
+		if err := e.App.SetTutorPrice(ctx, u, a.TutorID, nil); err != nil {
 			return true, err
 		}
-		return true, e.adminTutorCard(r, p.Int(0))
+		return true, e.adminTutorCard(r, a.TutorID)
 
-	case "ainv":
+	case actions.InviteTutor:
 		payload, err := e.App.CreateInvite(ctx, u, core.InviteTutor)
 		if err != nil {
 			return true, err
@@ -65,30 +68,30 @@ func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
 		r.screen("Отправьте ссылку репетитору. Одноразовая, действует 7 дней:\n\n"+e.BotLink(payload), back)
 		return true, nil
 
-	case "apr":
+	case actions.Prices:
 		return true, e.adminPrices(r)
 
-	case "abp":
+	case actions.AskBasePrice:
 		if err := e.S.SetState(ctx, u.ID, "abase", nil); err != nil {
 			return true, err
 		}
 		r.screen("Введите общую цену одного урока в рублях, например 1500.\nУже купленные пакеты и абонементы не изменятся.")
 		return true, nil
 
-	case "aptg":
-		if err := e.App.ToggleProduct(ctx, u, int(p.Int(0))); err != nil {
+	case actions.ToggleProduct:
+		if err := e.App.ToggleProduct(ctx, u, a.ProductID); err != nil {
 			return true, err
 		}
 		return true, e.adminPrices(r)
 
-	case "apadd":
+	case actions.AskProduct:
 		if err := e.S.SetState(ctx, u.ID, "aproduct", nil); err != nil {
 			return true, err
 		}
 		r.screen("Новый тариф одним сообщением:\nНазвание; число уроков; скидка %; срок в днях (0 — бессрочно)\n\nНапример:\nПакет 4 урока; 4; 3; 0\nАбонемент на 2 месяца; 16; 12; 62")
 		return true, nil
 
-	case "afb":
+	case actions.FeedbackList:
 		fs, err := e.App.RecentFeedback(ctx, u, 10)
 		if err != nil {
 			return true, err
@@ -112,15 +115,15 @@ func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
 			if f.Forwarded {
 				b.WriteString("\n   ✉️ передано репетитору")
 			} else {
-				rows = append(rows, msg.Row(msg.Btn(fmt.Sprintf("📨 Сообщить %s про %s", f.TutorName, f.StudentName), "fwd", f.ID)))
+				rows = append(rows, msg.Row(msg.Btn(fmt.Sprintf("📨 Сообщить %s про %s", f.TutorName, f.StudentName), actions.ForwardFeedback{FeedbackID: f.ID})))
 			}
 		}
 		rows = append(rows, back)
 		r.screen(b.String(), rows...)
 		return true, nil
 
-	case "fwd":
-		text, err := e.App.ForwardFeedback(ctx, u, p.Int(0))
+	case actions.ForwardFeedback:
+		text, err := e.App.ForwardFeedback(ctx, u, a.FeedbackID)
 		if err != nil {
 			return true, err
 		}
@@ -128,7 +131,7 @@ func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
 		r.send("✅ " + text)
 		return true, nil
 
-	case "alc":
+	case actions.LateCancels:
 		ls, err := e.App.LateCancels(ctx, u, 15)
 		if err != nil {
 			return true, err
@@ -148,7 +151,7 @@ func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
 		r.screen(b.String(), back)
 		return true, nil
 
-	case "asub":
+	case actions.Subjects:
 		subs, err := e.App.Subjects(ctx)
 		if err != nil {
 			return true, err
@@ -157,10 +160,10 @@ func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
 		for i, s := range subs {
 			names[i] = "• " + s.Name
 		}
-		r.screen("📚 Предметы:\n"+strings.Join(names, "\n"), msg.Row(msg.Btn("➕ Добавить предмет", "asubadd")), back)
+		r.screen("📚 Предметы:\n"+strings.Join(names, "\n"), msg.Row(msg.Btn("➕ Добавить предмет", actions.AskSubject{})), back)
 		return true, nil
 
-	case "asubadd":
+	case actions.AskSubject:
 		if err := e.S.SetState(ctx, u.ID, "asubject", nil); err != nil {
 			return true, err
 		}
@@ -186,11 +189,11 @@ func (e *Engine) adminTutorCard(r *req, id int64) error {
 	}
 	text := fmt.Sprintf("👩‍🏫 %s\nПредметы: %s\nУрок: %d мин, %s\nОкон в неделю: %d\nУчеников: %d",
 		t.Name, strings.Join(subs, ", "), t.LessonMinutes, price, c.Windows, c.Students)
-	rows := [][]msg.Button{msg.Row(msg.Btn("💰 Индивидуальная цена", "atp", id))}
+	rows := [][]msg.Button{msg.Row(msg.Btn("💰 Индивидуальная цена", actions.AskTutorPrice{TutorID: id}))}
 	if t.PriceOverride != nil {
-		rows = append(rows, msg.Row(msg.Btn("↩️ Вернуть общую цену", "atpr", id)))
+		rows = append(rows, msg.Row(msg.Btn("↩️ Вернуть общую цену", actions.ResetTutorPrice{TutorID: id})))
 	}
-	rows = append(rows, msg.Row(msg.Btn("⬅️ К списку", "at")))
+	rows = append(rows, msg.Row(msg.Btn("⬅️ К списку", actions.AdminTutors{})))
 	r.screen(text, rows...)
 	return nil
 }
@@ -203,7 +206,7 @@ func (e *Engine) adminPrices(r *req) error {
 	base, ps := pl.BasePrice, pl.Products
 	var b strings.Builder
 	fmt.Fprintf(&b, "💰 Общая цена урока: %s\n\nТарифы (по общей цене):", domain.FormatRub(base))
-	rows := [][]msg.Button{msg.Row(msg.Btn("✏️ Изменить общую цену", "abp"))}
+	rows := [][]msg.Button{msg.Row(msg.Btn("✏️ Изменить общую цену", actions.AskBasePrice{}))}
 	for _, p := range ps {
 		state := "✅"
 		if !p.Active {
@@ -217,9 +220,9 @@ func (e *Engine) adminPrices(r *req) error {
 		if !p.Active {
 			toggle = "Показать"
 		}
-		rows = append(rows, msg.Row(msg.Btn(toggle+": "+trim(p.Name, 30), "aptg", p.ID)))
+		rows = append(rows, msg.Row(msg.Btn(toggle+": "+trim(p.Name, 30), actions.ToggleProduct{ProductID: p.ID})))
 	}
-	rows = append(rows, msg.Row(msg.Btn("➕ Новый тариф", "apadd")), msg.Row(msg.Btn("⬅️ Назад", "home")))
+	rows = append(rows, msg.Row(msg.Btn("➕ Новый тариф", actions.AskProduct{})), msg.Row(msg.Btn("⬅️ Назад", actions.Home{})))
 	r.screen(b.String(), rows...)
 	return nil
 }
@@ -268,7 +271,7 @@ func (e *Engine) adminText(r *req, state string, data map[string]string, text st
 			return true, err
 		}
 		_ = e.S.ClearState(ctx, u.ID)
-		_, err := e.adminAction(r, msg.Parse("asub"))
+		_, err := e.adminAction(r, actions.Subjects{})
 		return true, err
 	}
 	return true, nil

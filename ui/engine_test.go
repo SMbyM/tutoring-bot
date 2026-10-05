@@ -434,3 +434,25 @@ func TestProductionHidesDebug(t *testing.T) {
 	admin.do(ui.Input{Action: "dbr:student"})
 	admin.sees("нет прав")
 }
+
+// Данные кнопки приходят от клиента: мусор и подделки не должны ронять бота или давать доступ.
+func TestForgedButtons(t *testing.T) {
+	w := newWorld(t, true)
+	kid := w.user("300", "Петя")
+	register(kid, "Ученик", "Петя")
+	for _, data := range []string{"mk:1:delete", "bk:1:1:1:zzz", "lo:abc", "nope", "rd:1:2026-01-01", strings.Repeat("x", 100)} {
+		out := kid.do(ui.Input{Action: data})
+		toast := false
+		for _, m := range out {
+			if m.Toast == "Кнопка устарела" {
+				toast = true
+			}
+		}
+		if !toast {
+			t.Errorf("кнопка %q: ожидалось «Кнопка устарела», получено %s", data, dump(out))
+		}
+	}
+	// корректная по форме, но чужая кнопка: права проверяет core
+	kid.do(ui.Input{Action: "ls:999999"})
+	kid.sees("нет прав")
+}

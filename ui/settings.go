@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"github.com/SMbyM/tutoring-bot/actions"
 	"github.com/SMbyM/tutoring-bot/core"
 	"github.com/SMbyM/tutoring-bot/domain"
 	"github.com/SMbyM/tutoring-bot/msg"
@@ -18,32 +19,32 @@ func (e *Engine) settingsScreen(r *req, onboarding bool) error {
 		text = "Почти готово! Вот настройки по умолчанию — нажмите на пункт, чтобы изменить, или оставьте как есть:"
 	}
 	rows := [][]msg.Button{
-		msg.Row(msg.Btn("☀️ Утром в день урока: "+onOff(st.RemindMorning)+" — изменить", "stt", string(core.SettingMorning))),
+		msg.Row(msg.Btn("☀️ Утром в день урока: "+onOff(st.RemindMorning)+" — изменить", actions.ToggleSetting{Key: string(core.SettingMorning)})),
 	}
 	// за час до урока напоминаем ученику и репетитору; родителю — только утреннее
 	if r.role != domain.RoleParent {
-		rows = append(rows, msg.Row(msg.Btn("⏰ За час до урока: "+onOff(st.RemindHour)+" — изменить", "stt", string(core.SettingHour))))
+		rows = append(rows, msg.Row(msg.Btn("⏰ За час до урока: "+onOff(st.RemindHour)+" — изменить", actions.ToggleSetting{Key: string(core.SettingHour)})))
 	}
 	done := "✅ Готово"
 	if onboarding {
 		done = "✅ Всё оставить как есть"
 	}
-	rows = append(rows, msg.Row(msg.Btn(done, "stok")))
+	rows = append(rows, msg.Row(msg.Btn(done, actions.SettingsDone{})))
 	r.screen(text, rows...)
 	return nil
 }
 
-func (e *Engine) settingsAction(r *req, p msg.Parsed) error {
-	switch p.Name {
-	case "st":
+func (e *Engine) settingsAction(r *req, act actions.Action) error {
+	switch a := act.(type) {
+	case actions.Settings:
 		return e.settingsScreen(r, false)
-	case "stt":
-		st, err := e.App.ToggleSetting(r.ctx, r.u, core.SettingKey(p.Str(0)))
+	case actions.ToggleSetting:
+		st, err := e.App.ToggleSetting(r.ctx, r.u, core.SettingKey(a.Key))
 		if err != nil {
 			return err
 		}
 		return e.settingsScreen(r, !st.Onboarded)
-	case "stok":
+	case actions.SettingsDone:
 		first, err := e.App.FinishOnboarding(r.ctx, r.u)
 		if err != nil {
 			return err
