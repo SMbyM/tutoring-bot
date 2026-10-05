@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/SMbyM/tutoring-bot/actions"
 	"github.com/SMbyM/tutoring-bot/domain"
 	"github.com/SMbyM/tutoring-bot/msg"
 	"github.com/SMbyM/tutoring-bot/store"
@@ -53,7 +54,7 @@ func (a *App) MarkLesson(ctx context.Context, u domain.User, lessonID int64, mar
 			return "", err
 		}
 		m := msg.Message{Text: "🔄 Репетитор отметил, что урок перенесён:\n" + LessonLine(l, loc, true, false) +
-			"\nВыберите новое время.", Buttons: [][]msg.Button{msg.Row(msg.Btn("📅 Выбрать время", "bk", l.TutorID, l.SubjectID, l.StudentID, "o"))}}
+			"\nВыберите новое время.", Buttons: [][]msg.Button{msg.Row(msg.Btn("📅 Выбрать время", actions.PickDay{TutorID: l.TutorID, SubjectID: l.SubjectID, StudentID: l.StudentID, Mode: actions.ModeOnce}))}}
 		a.NotifyMany(ctx, append([]int64{l.StudentID}, a.parentIDs(ctx, l.StudentID)...), m)
 		return "Отмечено: перенесён. Ученику предложено выбрать новое время.", nil
 	}
@@ -70,13 +71,13 @@ func (a *App) onHeld(ctx context.Context, l domain.Lesson) {
 		if err == nil && bal <= 0 {
 			a.NotifyMany(ctx, append([]int64{l.StudentID}, a.parentIDs(ctx, l.StudentID)...),
 				msg.Message{Text: fmt.Sprintf("💳 Оплаченные уроки у репетитора %s закончились (баланс: %d).", l.TutorName, bal),
-					Buttons: [][]msg.Button{msg.Row(msg.Btn("Оплатить", "pay", l.StudentID, l.TutorID))}})
+					Buttons: [][]msg.Button{msg.Row(msg.Btn("Оплатить", actions.PayOptions{StudentID: l.StudentID, TutorID: l.TutorID}))}})
 		}
 		return
 	}
 	text := fmt.Sprintf("Как прошёл пробный урок у репетитора %s (%s)?\nОт ответа зависит доступ к закрытому каналу с материалами.", l.TutorName, l.Subject)
 	m := msg.Message{Text: text, Buttons: [][]msg.Button{msg.Row(
-		msg.Btn("👍 Понравился", "fb", l.ID, true), msg.Btn("👎 Не понравился", "fb", l.ID, false))}}
+		msg.Btn("👍 Понравился", actions.Feedback{LessonID: l.ID, Liked: true}), msg.Btn("👎 Не понравился", actions.Feedback{LessonID: l.ID}))}}
 	a.Notify(ctx, l.StudentID, m)
 }
 
@@ -122,7 +123,7 @@ func (a *App) LeaveFeedback(ctx context.Context, u domain.User, lessonID int64, 
 	}
 	a.NotifyMany(ctx, parents, msg.Text(text))
 	a.NotifyMany(ctx, a.adminIDs(ctx), msg.Message{Text: text,
-		Buttons: [][]msg.Button{msg.Row(msg.Btn("📨 Сообщить репетитору", "fwd", id))}})
+		Buttons: [][]msg.Button{msg.Row(msg.Btn("📨 Сообщить репетитору", actions.ForwardFeedback{FeedbackID: id}))}})
 	if liked {
 		if err := a.SyncAccess(ctx, l.StudentID); err != nil {
 			a.Log.Warn("доступ в канал", "err", err)

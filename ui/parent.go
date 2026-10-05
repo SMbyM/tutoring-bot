@@ -3,15 +3,16 @@ package ui
 import (
 	"fmt"
 
+	"github.com/SMbyM/tutoring-bot/actions"
 	"github.com/SMbyM/tutoring-bot/core"
 	"github.com/SMbyM/tutoring-bot/msg"
 )
 
-func (e *Engine) parentAction(r *req, p msg.Parsed) (bool, error) {
+func (e *Engine) parentAction(r *req, act actions.Action) (bool, error) {
 	ctx, u := r.ctx, r.u
-	switch p.Name {
-	case "kid": // меню ребёнка
-		c, err := e.App.Child(ctx, u, p.Int(0))
+	switch a := act.(type) {
+	case actions.Child:
+		c, err := e.App.Child(ctx, u, a.KidID)
 		if err != nil {
 			return true, err
 		}
@@ -25,35 +26,35 @@ func (e *Engine) parentAction(r *req, p msg.Parsed) (bool, error) {
 		}
 		kidID := c.Kid.ID
 		r.screen(text,
-			msg.Row(msg.Btn("📅 Уроки", "ls", kidID), msg.Btn("➕ Записать", "nb", kidID)),
-			msg.Row(msg.Btn("💳 Оплата и баланс", "py", kidID)),
-			msg.Row(msg.Btn("🔐 Перенос: изменить режим", "kpm", kidID)),
-			msg.Row(msg.Btn("⬅️ Назад", "home")))
+			msg.Row(msg.Btn("📅 Уроки", actions.StudentLessons{StudentID: kidID}), msg.Btn("➕ Записать", actions.PickSubject{StudentID: kidID})),
+			msg.Row(msg.Btn("💳 Оплата и баланс", actions.Balances{StudentID: kidID})),
+			msg.Row(msg.Btn("🔐 Перенос: изменить режим", actions.ToggleChildApproval{KidID: kidID})),
+			msg.Row(msg.Btn("⬅️ Назад", actions.Home{})))
 		return true, nil
 
-	case "kpm": // режим переноса для ребёнка
-		if err := e.App.ToggleChildApproval(ctx, u, p.Int(0)); err != nil {
+	case actions.ToggleChildApproval:
+		if err := e.App.ToggleChildApproval(ctx, u, a.KidID); err != nil {
 			return true, err
 		}
-		return e.parentAction(r, msg.Parse(msg.Act("kid", p.Int(0))))
+		return e.parentAction(r, actions.Child{KidID: a.KidID})
 
-	case "cinv": // родитель приглашает ребёнка с Telegram
+	case actions.InviteChild:
 		payload, err := e.App.CreateInvite(ctx, u, core.InviteChild)
 		if err != nil {
 			return true, err
 		}
 		r.screen("Отправьте эту ссылку ребёнку — после перехода его аккаунт привяжется к вашему. Одноразовая, действует 7 дней:\n\n"+e.BotLink(payload),
-			msg.Row(msg.Btn("⬅️ Назад", "home")))
+			msg.Row(msg.Btn("⬅️ Назад", actions.Home{})))
 		return true, nil
 
-	case "kidadd":
+	case actions.AddChild:
 		if err := e.S.SetState(ctx, u.ID, "kidname", nil); err != nil {
 			return true, err
 		}
 		r.screen("Как зовут ребёнка? Напишите имя.\nВсе уведомления для него будут приходить вам.")
 		return true, nil
 
-	case "kg": // класс ребёнка без Telegram → создаём аккаунт
+	case actions.ChildGrade: // класс ребёнка без Telegram → создаём аккаунт
 		state, data, err := e.S.State(ctx, u.ID)
 		if err != nil {
 			return true, err
@@ -61,13 +62,13 @@ func (e *Engine) parentAction(r *req, p msg.Parsed) (bool, error) {
 		if state != "kidgrade" || data["name"] == "" {
 			return true, e.home(r)
 		}
-		id, err := e.App.AddManagedChild(ctx, u, data["name"], int(p.Int(0)))
+		id, err := e.App.AddManagedChild(ctx, u, data["name"], a.Grade)
 		if err != nil {
 			return true, err
 		}
 		_ = e.S.ClearState(ctx, u.ID)
 		r.screen("✅ "+data["name"]+" добавлен(а). Теперь можно записать на пробный урок.",
-			msg.Row(msg.Btn("➕ Записать", "nb", id)), msg.Row(msg.Btn("🏠 Меню", "home")))
+			msg.Row(msg.Btn("➕ Записать", actions.PickSubject{StudentID: id})), msg.Row(msg.Btn("🏠 Меню", actions.Home{})))
 		return true, nil
 	}
 	return false, nil

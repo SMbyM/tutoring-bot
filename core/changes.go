@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/SMbyM/tutoring-bot/actions"
 	"github.com/SMbyM/tutoring-bot/domain"
 	"github.com/SMbyM/tutoring-bot/msg"
 	"github.com/SMbyM/tutoring-bot/store"
@@ -97,7 +98,7 @@ func (a *App) askParents(ctx context.Context, reqID int64, l domain.Lesson, kind
 		text += "\nПричина: " + reason
 	}
 	m := msg.Message{Text: text, Buttons: [][]msg.Button{msg.Row(
-		msg.Btn("✅ Разрешить", "cr", reqID, true), msg.Btn("❌ Отклонить", "cr", reqID, false))}}
+		msg.Btn("✅ Разрешить", actions.DecideRequest{RequestID: reqID, Approve: true}), msg.Btn("❌ Отклонить", actions.DecideRequest{RequestID: reqID}))}}
 	a.NotifyMany(ctx, parents, m)
 }
 

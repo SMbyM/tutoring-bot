@@ -5,6 +5,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"github.com/SMbyM/tutoring-bot/actions"
 	"log/slog"
 	"strings"
 	"time"
@@ -151,7 +152,12 @@ func (e *Engine) handle(r *req) error {
 	}
 
 	if in.Action != "" {
-		return e.action(r, msg.Parse(in.Action))
+		a, err := actions.Decode(in.Action)
+		if err != nil {
+			r.toast("Кнопка устарела")
+			return nil
+		}
+		return e.action(r, a)
 	}
 	if text != "" {
 		state, data, err := e.S.State(ctx, u.ID)
@@ -188,7 +194,7 @@ func (e *Engine) home(r *req) error {
 		text := "Здравствуйте! Это бот школы репетиторов: запись на занятия, расписание и напоминания.\n\n" +
 			"Мы храним только имя, класс и расписание занятий. Нажимая «Согласен», вы соглашаетесь на обработку этих данных. " +
 			"Если ученику нет 18 лет, согласие даёт родитель — привяжите его аккаунт в меню после регистрации."
-		rows := [][]msg.Button{msg.Row(msg.Btn("✅ Согласен", "consent"))}
+		rows := [][]msg.Button{msg.Row(msg.Btn("✅ Согласен", actions.Consent{}))}
 		if e.PolicyURL != "" {
 			rows = append([][]msg.Button{msg.Row(msg.Link("📄 Политика обработки данных", e.PolicyURL))}, rows...)
 		}
@@ -196,14 +202,14 @@ func (e *Engine) home(r *req) error {
 		return nil
 	}
 	if u.Role == domain.RoleNone {
-		r.screen("Кто вы?", msg.Row(msg.Btn("🎒 Ученик", "role", "student"), msg.Btn("👨‍👩‍👧 Родитель", "role", "parent")))
+		r.screen("Кто вы?", msg.Row(msg.Btn("🎒 Ученик", actions.ChooseRole{Role: string(domain.RoleStudent)}), msg.Btn("👨‍👩‍👧 Родитель", actions.ChooseRole{Role: string(domain.RoleParent)})))
 		return nil
 	}
 	if strings.TrimSpace(u.Name) == "" {
 		return e.askName(r)
 	}
 	if u.Role == domain.RoleStudent && u.Grade == 0 && u.ManagedBy == 0 {
-		r.screen("В каком вы классе?", gradeRows("grade")...)
+		r.screen("В каком вы классе?", gradeRows(func(g int) actions.Action { return actions.SetGrade{Grade: g} })...)
 		return nil
 	}
 	st, err := e.App.Settings(r.ctx, u)
@@ -226,17 +232,17 @@ func (e *Engine) askName(r *req) error {
 	}
 	var rows [][]msg.Button
 	if r.in.FirstName != "" {
-		rows = append(rows, msg.Row(msg.Btn("Оставить «"+trim(r.in.FirstName, 20)+"»", "nameok")))
+		rows = append(rows, msg.Row(msg.Btn("Оставить «"+trim(r.in.FirstName, 20)+"»", actions.KeepProfileName{})))
 	}
 	r.screen("Как к вам обращаться? Напишите имя (можно без фамилии)."+hint, rows...)
 	return nil
 }
 
-func gradeRows(action string, args ...any) [][]msg.Button {
+func gradeRows(mk func(grade int) actions.Action) [][]msg.Button {
 	var rows [][]msg.Button
 	var row []msg.Button
 	for g := 1; g <= 11; g++ {
-		row = append(row, msg.Btn(itoa(g), action, append(append([]any{}, args...), g)...))
+		row = append(row, msg.Btn(itoa(g), mk(g)))
 		if len(row) == 6 {
 			rows = append(rows, row)
 			row = nil
@@ -251,10 +257,10 @@ func (e *Engine) mainMenu(r *req) error {
 	switch r.role {
 	case domain.RoleStudent:
 		rows = [][]msg.Button{
-			msg.Row(msg.Btn("📅 Мои уроки", "ls", r.u.ID)),
-			msg.Row(msg.Btn("➕ Записаться на урок", "nb", r.u.ID)),
-			msg.Row(msg.Btn("💳 Оплата и баланс", "py", r.u.ID)),
-			msg.Row(msg.Btn("👨‍👩‍👧 Привязать родителя", "pinv"), msg.Btn("⚙️ Настройки", "st")),
+			msg.Row(msg.Btn("📅 Мои уроки", actions.StudentLessons{StudentID: r.u.ID})),
+			msg.Row(msg.Btn("➕ Записаться на урок", actions.PickSubject{StudentID: r.u.ID})),
+			msg.Row(msg.Btn("💳 Оплата и баланс", actions.Balances{StudentID: r.u.ID})),
+			msg.Row(msg.Btn("👨‍👩‍👧 Привязать родителя", actions.InviteParent{}), msg.Btn("⚙️ Настройки", actions.Settings{})),
 		}
 	case domain.RoleParent:
 		kids, err := e.App.Children(r.ctx, r.u)
@@ -262,30 +268,30 @@ func (e *Engine) mainMenu(r *req) error {
 			return err
 		}
 		for _, k := range kids {
-			rows = append(rows, msg.Row(msg.Btn("👤 "+k.Name, "kid", k.ID)))
+			rows = append(rows, msg.Row(msg.Btn("👤 "+k.Name, actions.Child{KidID: k.ID})))
 		}
 		if len(kids) == 0 {
 			title += "\n\nПока не привязано ни одного ребёнка."
 		}
 		rows = append(rows,
-			msg.Row(msg.Btn("➕ Ребёнок с Telegram", "cinv"), msg.Btn("➕ Ребёнок без Telegram", "kidadd")),
-			msg.Row(msg.Btn("⚙️ Мои настройки", "st")))
+			msg.Row(msg.Btn("➕ Ребёнок с Telegram", actions.InviteChild{}), msg.Btn("➕ Ребёнок без Telegram", actions.AddChild{})),
+			msg.Row(msg.Btn("⚙️ Мои настройки", actions.Settings{})))
 	case domain.RoleTutor:
 		rows = [][]msg.Button{
-			msg.Row(msg.Btn("📅 Мои уроки", "tl")),
-			msg.Row(msg.Btn("🕒 Окна расписания", "tw"), msg.Btn("👥 Ученики", "tst")),
-			msg.Row(msg.Btn("👤 Профиль", "tp"), msg.Btn("⚙️ Настройки", "st")),
+			msg.Row(msg.Btn("📅 Мои уроки", actions.TutorLessons{})),
+			msg.Row(msg.Btn("🕒 Окна расписания", actions.Windows{}), msg.Btn("👥 Ученики", actions.MyStudents{})),
+			msg.Row(msg.Btn("👤 Профиль", actions.Profile{}), msg.Btn("⚙️ Настройки", actions.Settings{})),
 		}
 	case domain.RoleAdmin:
 		rows = [][]msg.Button{
-			msg.Row(msg.Btn("👩‍🏫 Репетиторы", "at"), msg.Btn("➕ Пригласить репетитора", "ainv")),
-			msg.Row(msg.Btn("💰 Цены и тарифы", "apr"), msg.Btn("📚 Предметы", "asub")),
-			msg.Row(msg.Btn("💬 Отзывы о пробных", "afb"), msg.Btn("⚠️ Поздние отмены", "alc")),
-			msg.Row(msg.Btn("⚙️ Настройки", "st")),
+			msg.Row(msg.Btn("👩‍🏫 Репетиторы", actions.AdminTutors{}), msg.Btn("➕ Пригласить репетитора", actions.InviteTutor{})),
+			msg.Row(msg.Btn("💰 Цены и тарифы", actions.Prices{}), msg.Btn("📚 Предметы", actions.Subjects{})),
+			msg.Row(msg.Btn("💬 Отзывы о пробных", actions.FeedbackList{}), msg.Btn("⚠️ Поздние отмены", actions.LateCancels{})),
+			msg.Row(msg.Btn("⚙️ Настройки", actions.Settings{})),
 		}
 	}
 	if r.u.CanSwitchRoles(e.debug()) {
-		rows = append(rows, msg.Row(msg.Btn("🧪 Тест: роль «"+r.role.Title()+"»", "dbg")))
+		rows = append(rows, msg.Row(msg.Btn("🧪 Тест: роль «"+r.role.Title()+"»", actions.Debug{})))
 	}
 	who := r.u.Name
 	if who != "" {
@@ -322,9 +328,9 @@ func (e *Engine) onText(r *req, state string, data map[string]string, text strin
 		if err != nil {
 			return err
 		}
-		rows := [][]msg.Button{msg.Row(msg.Btn("🏠 В меню", "home"))}
+		rows := [][]msg.Button{msg.Row(msg.Btn("🏠 В меню", actions.Home{}))}
 		if f.Liked {
-			rows = append([][]msg.Button{msg.Row(msg.Btn("🤝 Заниматься у этого репетитора", "enr", f.TutorID, f.SubjectID, f.StudentID))}, rows...)
+			rows = append([][]msg.Button{msg.Row(msg.Btn("🤝 Заниматься у этого репетитора", actions.Enroll{TutorID: f.TutorID, SubjectID: f.SubjectID, StudentID: f.StudentID}))}, rows...)
 		}
 		r.send("Спасибо, комментарий передан.", rows...)
 		return nil
@@ -332,7 +338,7 @@ func (e *Engine) onText(r *req, state string, data map[string]string, text strin
 		if err := e.S.SetState(ctx, u.ID, "kidgrade", map[string]string{"name": trim(text, 60)}); err != nil {
 			return err
 		}
-		r.send("В каком классе "+trim(text, 60)+"?", gradeRows("kg")...)
+		r.send("В каком классе "+trim(text, 60)+"?", gradeRows(func(g int) actions.Action { return actions.ChildGrade{Grade: g} })...)
 		return nil
 	}
 	if handled, err := e.tutorText(r, state, data, text); handled {
@@ -345,44 +351,44 @@ func (e *Engine) onText(r *req, state string, data map[string]string, text strin
 	return e.home(r)
 }
 
-// action — нажатия кнопок.
-func (e *Engine) action(r *req, p msg.Parsed) error {
+// action — нажатия кнопок. Действия уже разобраны и проверены пакетом actions.
+func (e *Engine) action(r *req, act actions.Action) error {
 	ctx, u := r.ctx, r.u
-	switch p.Name {
-	case "home":
+	switch a := act.(type) {
+	case actions.Home:
 		_ = e.S.ClearState(ctx, u.ID)
 		return e.home(r)
-	case "consent":
+	case actions.Consent:
 		if err := e.App.AcceptConsent(ctx, u); err != nil {
 			return err
 		}
 		r.u.Consent = true
 		return e.home(r)
-	case "role":
-		role := domain.Role(p.Str(0))
+	case actions.ChooseRole:
+		role := domain.Role(a.Role)
 		if err := e.App.ChooseRole(ctx, u, role); err != nil {
 			return e.home(r)
 		}
 		r.u.Role, r.role = role, role
 		return e.home(r)
-	case "nameok":
+	case actions.KeepProfileName:
 		if err := e.App.SetName(ctx, u, trim(r.in.FirstName, 60)); err != nil {
 			return err
 		}
 		r.u.Name = r.in.FirstName
 		_ = e.S.ClearState(ctx, u.ID)
 		return e.home(r)
-	case "grade":
-		if err := e.App.SetGrade(ctx, u, int(p.Int(0))); err != nil {
+	case actions.SetGrade:
+		if err := e.App.SetGrade(ctx, u, a.Grade); err != nil {
 			return err
 		}
-		r.u.Grade = int(p.Int(0))
+		r.u.Grade = a.Grade
 		return e.home(r)
-	case "st", "stt", "stok":
-		return e.settingsAction(r, p)
+	case actions.Settings, actions.ToggleSetting, actions.SettingsDone:
+		return e.settingsAction(r, act)
 	}
-	for _, h := range []func(*req, msg.Parsed) (bool, error){e.studentAction, e.lessonAction, e.parentAction, e.tutorAction, e.adminAction, e.debugAction} {
-		if handled, err := h(r, p); handled {
+	for _, h := range []func(*req, actions.Action) (bool, error){e.studentAction, e.lessonAction, e.parentAction, e.tutorAction, e.adminAction, e.debugAction} {
+		if handled, err := h(r, act); handled {
 			return err
 		}
 	}

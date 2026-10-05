@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SMbyM/tutoring-bot/actions"
 	"github.com/SMbyM/tutoring-bot/domain"
 	"github.com/SMbyM/tutoring-bot/msg"
 )
@@ -29,8 +30,8 @@ func (e *Engine) tutorWindows(r *req) error {
 		rows = append(rows, msg.Row(msg.Button{Text: "🖥 Открыть редактор расписания", WebApp: e.MiniAppURL + "/app/"}))
 	}
 	rows = append(rows,
-		msg.Row(msg.Btn("✏️ Задать текстом", "twt")),
-		msg.Row(msg.Btn("🏖 Добавить отпуск / перерыв", "twe")))
+		msg.Row(msg.Btn("✏️ Задать текстом", actions.EditWindowsText{})),
+		msg.Row(msg.Btn("🏖 Добавить отпуск / перерыв", actions.AskException{})))
 	if len(sc.Exceptions) > 0 {
 		b.WriteString("\n\n🏖 Недоступен:")
 		for _, x := range sc.Exceptions {
@@ -39,10 +40,10 @@ func (e *Engine) tutorWindows(r *req) error {
 				span += "–" + x.To.Format("02.01")
 			}
 			fmt.Fprintf(&b, "\n• %s %s", span, x.Note)
-			rows = append(rows, msg.Row(msg.Btn("❌ Убрать "+span, "twx", x.ID)))
+			rows = append(rows, msg.Row(msg.Btn("❌ Убрать "+span, actions.DeleteException{ID: x.ID})))
 		}
 	}
-	rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", "home")))
+	rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", actions.Home{})))
 	r.screen(b.String(), rows...)
 	return nil
 }
@@ -66,14 +67,14 @@ func (e *Engine) tutorProfile(r *req) error {
 		bio = "(не заполнено — расскажите ученикам о себе)"
 	}
 	text := fmt.Sprintf("👤 %s\n\nО себе: %s\n\nДлительность урока: %d мин", t.Name, bio, t.LessonMinutes)
-	rows := [][]msg.Button{msg.Row(msg.Btn("✏️ Изменить «О себе»", "tpb"))}
+	rows := [][]msg.Button{msg.Row(msg.Btn("✏️ Изменить «О себе»", actions.EditBio{}))}
 	var durRow []msg.Button
 	for _, m := range []int{45, 60, 90} {
 		label := fmt.Sprintf("%d мин", m)
 		if m == t.LessonMinutes {
 			label = "✅ " + label
 		}
-		durRow = append(durRow, msg.Btn(label, "tpd", m))
+		durRow = append(durRow, msg.Btn(label, actions.SetDuration{Minutes: m}))
 	}
 	rows = append(rows, durRow)
 	for _, s := range subs {
@@ -81,20 +82,20 @@ func (e *Engine) tutorProfile(r *req) error {
 		if has[s.ID] {
 			label = "✅ " + s.Name
 		}
-		rows = append(rows, msg.Row(msg.Btn(label, "tps", s.ID)))
+		rows = append(rows, msg.Row(msg.Btn(label, actions.ToggleSubject{SubjectID: s.ID})))
 	}
-	rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", "home")))
+	rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", actions.Home{})))
 	r.screen(text, rows...)
 	return nil
 }
 
 // Права проверяет core: каждое действие ниже вернёт ErrNotAllowed, если пользователь не репетитор.
-func (e *Engine) tutorAction(r *req, p msg.Parsed) (bool, error) {
+func (e *Engine) tutorAction(r *req, act actions.Action) (bool, error) {
 	ctx, u := r.ctx, r.u
-	switch p.Name {
-	case "tw":
+	switch a := act.(type) {
+	case actions.Windows:
 		return true, e.tutorWindows(r)
-	case "twt":
+	case actions.EditWindowsText:
 		sc, err := e.App.MySchedule(ctx, u)
 		if err != nil {
 			return true, err
@@ -108,7 +109,7 @@ func (e *Engine) tutorAction(r *req, p msg.Parsed) (bool, error) {
 		}
 		r.screen("Отправьте окна одним сообщением, по строке на окно. Это заменит текущее расписание. Например:\n\nпн 15:00-19:00\nср, пт 10:00-13:00\nсб 11:00-15:00" + cur + "\n\n(/menu — отмена)")
 		return true, nil
-	case "twe":
+	case actions.AskException:
 		if _, err := e.App.MySchedule(ctx, u); err != nil {
 			return true, err
 		}
@@ -117,18 +118,18 @@ func (e *Engine) tutorAction(r *req, p msg.Parsed) (bool, error) {
 		}
 		r.screen("Когда вы недоступны? Например:\n\n20.10-26.10 отпуск\n03.11 сессия\n\n(/menu — отмена)")
 		return true, nil
-	case "twx":
-		if err := e.App.DeleteException(ctx, u, p.Int(0)); err != nil {
+	case actions.DeleteException:
+		if err := e.App.DeleteException(ctx, u, a.ID); err != nil {
 			return true, err
 		}
 		return true, e.tutorWindows(r)
-	case "tst":
+	case actions.MyStudents:
 		sts, err := e.App.MyStudents(ctx, u)
 		if err != nil {
 			return true, err
 		}
 		if len(sts) == 0 {
-			r.screen("Пока нет закреплённых учеников.", msg.Row(msg.Btn("⬅️ Назад", "home")))
+			r.screen("Пока нет закреплённых учеников.", msg.Row(msg.Btn("⬅️ Назад", actions.Home{})))
 			return true, nil
 		}
 		var b strings.Builder
@@ -136,11 +137,11 @@ func (e *Engine) tutorAction(r *req, p msg.Parsed) (bool, error) {
 		for _, s := range sts {
 			fmt.Fprintf(&b, "\n• %s, %d кл. — %d", s.Student.Name, s.Student.Grade, s.Balance)
 		}
-		r.screen(b.String(), msg.Row(msg.Btn("⬅️ Назад", "home")))
+		r.screen(b.String(), msg.Row(msg.Btn("⬅️ Назад", actions.Home{})))
 		return true, nil
-	case "tp":
+	case actions.Profile:
 		return true, e.tutorProfile(r)
-	case "tpb":
+	case actions.EditBio:
 		if _, err := e.App.MySchedule(ctx, u); err != nil {
 			return true, err
 		}
@@ -149,13 +150,13 @@ func (e *Engine) tutorAction(r *req, p msg.Parsed) (bool, error) {
 		}
 		r.screen("Напишите пару предложений о себе: опыт, с какими классами работаете, к чему готовите.")
 		return true, nil
-	case "tpd":
-		if err := e.App.SetLessonMinutes(ctx, u, int(p.Int(0))); err != nil {
+	case actions.SetDuration:
+		if err := e.App.SetLessonMinutes(ctx, u, a.Minutes); err != nil {
 			return true, err
 		}
 		return true, e.tutorProfile(r)
-	case "tps":
-		if err := e.App.ToggleSubject(ctx, u, int(p.Int(0))); err != nil {
+	case actions.ToggleSubject:
+		if err := e.App.ToggleSubject(ctx, u, a.SubjectID); err != nil {
 			return true, err
 		}
 		return true, e.tutorProfile(r)

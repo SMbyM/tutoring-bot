@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SMbyM/tutoring-bot/actions"
 	"github.com/SMbyM/tutoring-bot/core"
 	"github.com/SMbyM/tutoring-bot/domain"
 	"github.com/SMbyM/tutoring-bot/msg"
@@ -288,7 +289,9 @@ func TestFullFlow(t *testing.T) {
 	if len(momMsgs) == 0 || len(momMsgs[0].Buttons) == 0 {
 		t.Fatal("родитель должен получить кнопки подтверждения")
 	}
-	reqID := msg.Parse(momMsgs[0].Buttons[0][0].Action).Int(0)
+	act, err := actions.Decode(momMsgs[0].Buttons[0][0].Action)
+	must(t, err)
+	reqID := act.(actions.DecideRequest).RequestID
 	if _, err := a.DecideRequest(ctx, e.kid, reqID, true); !errors.Is(err, domain.ErrNotAllowed) {
 		t.Error("ученик не может одобрить сам себя")
 	}

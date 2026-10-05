@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/SMbyM/tutoring-bot/actions"
 	"github.com/SMbyM/tutoring-bot/domain"
 	"github.com/SMbyM/tutoring-bot/msg"
 	"github.com/SMbyM/tutoring-bot/store"
@@ -87,8 +88,8 @@ func (a *App) PromptMarks(ctx context.Context) error {
 		a.Notify(ctx, l.TutorID, msg.Message{
 			Text: "Как прошёл урок?\n" + LessonLine(l, t.Location(), false, true) + "\n(без ответа через 24 часа урок будет считаться состоявшимся)",
 			Buttons: [][]msg.Button{
-				msg.Row(msg.Btn("✅ Состоялся", "mk", l.ID, "held")),
-				msg.Row(msg.Btn("🙈 Ученик не пришёл", "mk", l.ID, "noshow"), msg.Btn("🔄 Перенесли", "mk", l.ID, "moved")),
+				msg.Row(msg.Btn("✅ Состоялся", actions.MarkLesson{LessonID: l.ID, Mark: actions.MarkHeld})),
+				msg.Row(msg.Btn("🙈 Ученик не пришёл", actions.MarkLesson{LessonID: l.ID, Mark: actions.MarkNoShow}), msg.Btn("🔄 Перенесли", actions.MarkLesson{LessonID: l.ID, Mark: actions.MarkMoved})),
 			}})
 	}
 	return nil

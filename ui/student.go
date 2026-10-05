@@ -5,43 +5,37 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SMbyM/tutoring-bot/actions"
 	"github.com/SMbyM/tutoring-bot/core"
 	"github.com/SMbyM/tutoring-bot/domain"
 	"github.com/SMbyM/tutoring-bot/msg"
 )
 
-// Режимы записи: t — пробный, o — разовый, r — постоянное время.
-const (
-	modeTrial     = "t"
-	modeOnce      = "o"
-	modeRecurring = "r"
-)
-
-func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
+func (e *Engine) studentAction(r *req, act actions.Action) (bool, error) {
 	ctx, u := r.ctx, r.u
-	switch p.Name {
-	case "nb": // выбор предмета
-		studentID := p.Int(0) // права на ученика проверит core на следующем шаге
+	switch a := act.(type) {
+	case actions.PickSubject:
+		// права на ученика проверит core на следующем шаге
 		subs, err := e.App.Subjects(ctx)
 		if err != nil {
 			return true, err
 		}
 		var rows [][]msg.Button
 		for _, s := range subs {
-			rows = append(rows, msg.Row(msg.Btn(s.Name, "ns", studentID, s.ID)))
+			rows = append(rows, msg.Row(msg.Btn(s.Name, actions.PickTutor{StudentID: a.StudentID, SubjectID: s.ID})))
 		}
-		rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", "home")))
+		rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", actions.Home{})))
 		r.screen("Какой предмет?", rows...)
 		return true, nil
 
-	case "ns": // список репетиторов по предмету
-		studentID, subjectID := p.Int(0), int(p.Int(1))
-		ts, err := e.App.TutorsForSubject(ctx, u, studentID, subjectID)
+	case actions.PickTutor:
+		ts, err := e.App.TutorsForSubject(ctx, u, a.StudentID, a.SubjectID)
 		if err != nil {
 			return true, err
 		}
+		back := msg.Row(msg.Btn("⬅️ Назад", actions.PickSubject{StudentID: a.StudentID}))
 		if len(ts) == 0 {
-			r.screen("По этому предмету пока нет репетиторов.", msg.Row(msg.Btn("⬅️ Назад", "nb", studentID)))
+			r.screen("По этому предмету пока нет репетиторов.", back)
 			return true, nil
 		}
 		var rows [][]msg.Button
@@ -50,87 +44,88 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 			if t.Enrolled {
 				label = "⭐ " + label + " (ваш репетитор)"
 			}
-			rows = append(rows, msg.Row(msg.Btn(label, "tc", studentID, subjectID, t.Tutor.ID)))
+			rows = append(rows, msg.Row(msg.Btn(label, actions.TutorCard{StudentID: a.StudentID, SubjectID: a.SubjectID, TutorID: t.Tutor.ID})))
 		}
-		rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", "nb", studentID)))
+		rows = append(rows, back)
 		r.screen("Выберите репетитора. У каждого можно взять один бесплатный пробный урок.", rows...)
 		return true, nil
 
-	case "tc": // карточка репетитора
-		studentID, subjectID, tutorID := p.Int(0), int(p.Int(1)), p.Int(2)
-		o, err := e.App.TutorOffer(ctx, u, studentID, subjectID, tutorID)
+	case actions.TutorCard:
+		o, err := e.App.TutorOffer(ctx, u, a.StudentID, a.SubjectID, a.TutorID)
 		if err != nil {
 			return true, err
 		}
-		t, price, enrolled, liked, trialUsed := o.Tutor, o.Price, o.Enrolled, o.Liked, o.TrialUsed
-		var b strings.Builder
-		fmt.Fprintf(&b, "👩‍🏫 %s\n", t.Name)
-		if t.Bio != "" {
-			fmt.Fprintf(&b, "\n%s\n", t.Bio)
+		pick := func(mode actions.BookMode) actions.Action {
+			return actions.PickDay{TutorID: a.TutorID, SubjectID: a.SubjectID, StudentID: a.StudentID, Mode: mode}
 		}
-		fmt.Fprintf(&b, "\nУрок: %d мин · %s", t.LessonMinutes, domain.FormatRub(price))
+		var b strings.Builder
+		fmt.Fprintf(&b, "👩‍🏫 %s\n", o.Tutor.Name)
+		if o.Tutor.Bio != "" {
+			fmt.Fprintf(&b, "\n%s\n", o.Tutor.Bio)
+		}
+		fmt.Fprintf(&b, "\nУрок: %d мин · %s", o.Tutor.LessonMinutes, domain.FormatRub(o.Price))
 		var rows [][]msg.Button
 		switch {
-		case enrolled:
+		case o.Enrolled:
 			b.WriteString("\n\n⭐ Вы занимаетесь у этого репетитора.")
 			rows = append(rows,
-				msg.Row(msg.Btn("🔁 Постоянное время (каждую неделю)", "bk", tutorID, subjectID, studentID, modeRecurring)),
-				msg.Row(msg.Btn("📅 Разовый урок", "bk", tutorID, subjectID, studentID, modeOnce)))
-		case liked:
+				msg.Row(msg.Btn("🔁 Постоянное время (каждую неделю)", pick(actions.ModeRecurring))),
+				msg.Row(msg.Btn("📅 Разовый урок", pick(actions.ModeOnce))))
+		case o.Liked:
 			b.WriteString("\n\nПробный урок понравился — можно закрепиться за репетитором.")
-			rows = append(rows, msg.Row(msg.Btn("🤝 Заниматься у этого репетитора", "enr", tutorID, subjectID, studentID)))
-		case trialUsed:
+			rows = append(rows, msg.Row(msg.Btn("🤝 Заниматься у этого репетитора",
+				actions.Enroll{TutorID: a.TutorID, SubjectID: a.SubjectID, StudentID: a.StudentID})))
+		case o.TrialUsed:
 			b.WriteString("\n\nПробный урок уже записан или проведён.")
 		default:
-			rows = append(rows, msg.Row(msg.Btn("🎁 Пробный урок (бесплатно)", "bk", tutorID, subjectID, studentID, modeTrial)))
+			rows = append(rows, msg.Row(msg.Btn("🎁 Пробный урок (бесплатно)", pick(actions.ModeTrial))))
 		}
-		rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", "ns", studentID, subjectID)))
+		rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", actions.PickTutor{StudentID: a.StudentID, SubjectID: a.SubjectID})))
 		r.screen(b.String(), rows...)
 		return true, nil
 
-	case "bk": // выбор дня
-		tutorID, subjectID, studentID, mode := p.Int(0), int(p.Int(1)), p.Int(2), p.Str(3)
-		slots, _, err := e.App.FreeSlots(ctx, u, tutorID, studentID, 0)
+	case actions.PickDay:
+		slots, _, err := e.App.FreeSlots(ctx, u, a.TutorID, a.StudentID, 0)
 		if err != nil {
 			return true, err
 		}
-		back := msg.Row(msg.Btn("⬅️ Назад", "tc", studentID, subjectID, tutorID))
+		back := msg.Row(msg.Btn("⬅️ Назад", actions.TutorCard{StudentID: a.StudentID, SubjectID: a.SubjectID, TutorID: a.TutorID}))
 		if len(slots) == 0 {
 			r.screen("Свободных окон в ближайшие две недели нет. Попробуйте позже или выберите другого репетитора.", back)
 			return true, nil
 		}
-		r.screen(modeTitle(mode)+"\nВыберите день:", append(dayRows(slots, r.loc(), func(day string) msg.Button {
-			return msg.Button{Action: msg.Act("bd", tutorID, subjectID, studentID, mode, day)}
+		r.screen(modeTitle(a.Mode)+"\nВыберите день:", append(dayRows(slots, r.loc(), func(day actions.Day) actions.Action {
+			return actions.PickTime{TutorID: a.TutorID, SubjectID: a.SubjectID, StudentID: a.StudentID, Mode: a.Mode, Day: day}
 		}), back)...)
 		return true, nil
 
-	case "bd": // выбор времени
-		tutorID, subjectID, studentID, mode, day := p.Int(0), int(p.Int(1)), p.Int(2), p.Str(3), p.Str(4)
-		slots, _, err := e.App.FreeSlots(ctx, u, tutorID, studentID, 0)
+	case actions.PickTime:
+		slots, _, err := e.App.FreeSlots(ctx, u, a.TutorID, a.StudentID, 0)
 		if err != nil {
 			return true, err
 		}
-		rows := timeRows(slots, day, r.loc(), func(t time.Time) string {
-			return msg.Act("bt", tutorID, subjectID, studentID, mode, t.Unix())
+		rows := timeRows(slots, a.Day, r.loc(), func(t time.Time) actions.Action {
+			return actions.Book{TutorID: a.TutorID, SubjectID: a.SubjectID, StudentID: a.StudentID, Mode: a.Mode, Start: t.Unix()}
 		})
-		rows = append(rows, msg.Row(msg.Btn("⬅️ Другой день", "bk", tutorID, subjectID, studentID, mode)))
-		r.screen(modeTitle(mode)+"\nВыберите время:", rows...)
+		rows = append(rows, msg.Row(msg.Btn("⬅️ Другой день",
+			actions.PickDay{TutorID: a.TutorID, SubjectID: a.SubjectID, StudentID: a.StudentID, Mode: a.Mode})))
+		r.screen(modeTitle(a.Mode)+"\nВыберите время:", rows...)
 		return true, nil
 
-	case "bt": // запись
-		tutorID, subjectID, studentID, mode, start := p.Int(0), int(p.Int(1)), p.Int(2), p.Str(3), time.Unix(p.Int(4), 0)
+	case actions.Book:
+		start := a.StartTime()
 		var err error
 		var text string
-		switch mode {
-		case modeTrial:
-			_, err = e.App.BookTrial(ctx, u, studentID, tutorID, subjectID, start)
+		switch a.Mode {
+		case actions.ModeTrial:
+			_, err = e.App.BookTrial(ctx, u, a.StudentID, a.TutorID, a.SubjectID, start)
 			text = "✅ Записали на пробный урок: " + domain.FormatDateTime(start, r.loc()) + "\nНапомним утром в день урока и за час до начала."
-		case modeOnce:
-			_, err = e.App.BookOnce(ctx, u, studentID, tutorID, subjectID, start)
+		case actions.ModeOnce:
+			_, err = e.App.BookOnce(ctx, u, a.StudentID, a.TutorID, a.SubjectID, start)
 			text = "✅ Записали на урок: " + domain.FormatDateTime(start, r.loc())
-		case modeRecurring:
+		case actions.ModeRecurring:
 			var n int
-			_, n, err = e.App.BookRecurring(ctx, u, studentID, tutorID, subjectID, start)
+			_, n, err = e.App.BookRecurring(ctx, u, a.StudentID, a.TutorID, a.SubjectID, start)
 			lt := start.In(r.loc())
 			text = fmt.Sprintf("✅ Постоянное время: каждую неделю — %s, %s.\nСоздано уроков на ближайшие недели: %d",
 				domain.WeekdayFull(lt.Weekday()), domain.FormatTime(start, r.loc()), n)
@@ -138,29 +133,30 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 		if err != nil {
 			return true, err
 		}
-		r.screen(text, msg.Row(msg.Btn("📅 Мои уроки", "ls", studentID), msg.Btn("🏠 Меню", "home")))
+		r.screen(text, msg.Row(msg.Btn("📅 Мои уроки", actions.StudentLessons{StudentID: a.StudentID}), msg.Btn("🏠 Меню", actions.Home{})))
 		return true, nil
 
-	case "enr":
-		tutorID, subjectID, studentID := p.Int(0), int(p.Int(1)), p.Int(2)
-		if err := e.App.Enroll(ctx, u, studentID, tutorID, subjectID); err != nil {
+	case actions.Enroll:
+		if err := e.App.Enroll(ctx, u, a.StudentID, a.TutorID, a.SubjectID); err != nil {
 			return true, err
 		}
+		pick := func(mode actions.BookMode) actions.Action {
+			return actions.PickDay{TutorID: a.TutorID, SubjectID: a.SubjectID, StudentID: a.StudentID, Mode: mode}
+		}
 		r.screen("🤝 Готово! Теперь можно выбрать постоянное время занятий или записаться на разовый урок.",
-			msg.Row(msg.Btn("🔁 Постоянное время", "bk", tutorID, subjectID, studentID, modeRecurring)),
-			msg.Row(msg.Btn("📅 Разовый урок", "bk", tutorID, subjectID, studentID, modeOnce)),
-			msg.Row(msg.Btn("💳 Оплатить занятия", "pay", studentID, tutorID)))
+			msg.Row(msg.Btn("🔁 Постоянное время", pick(actions.ModeRecurring))),
+			msg.Row(msg.Btn("📅 Разовый урок", pick(actions.ModeOnce))),
+			msg.Row(msg.Btn("💳 Оплатить занятия", actions.PayOptions{StudentID: a.StudentID, TutorID: a.TutorID})))
 		return true, nil
 
-	case "py": // баланс по репетиторам
-		studentID := p.Int(0)
-		ens, err := e.App.Balances(ctx, u, studentID)
+	case actions.Balances:
+		ens, err := e.App.Balances(ctx, u, a.StudentID)
 		if err != nil {
 			return true, err
 		}
 		if len(ens) == 0 {
 			r.screen("Оплата появится после выбора репетитора: сначала пробный урок, затем «Заниматься у этого репетитора».",
-				msg.Row(msg.Btn("➕ Записаться", "nb", studentID)), msg.Row(msg.Btn("⬅️ Назад", "home")))
+				msg.Row(msg.Btn("➕ Записаться", actions.PickSubject{StudentID: a.StudentID})), msg.Row(msg.Btn("⬅️ Назад", actions.Home{})))
 			return true, nil
 		}
 		var b strings.Builder
@@ -168,15 +164,14 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 		var rows [][]msg.Button
 		for _, en := range ens {
 			fmt.Fprintf(&b, "\n• %s (%s): %d", en.TutorName, en.Subject, en.Balance)
-			rows = append(rows, msg.Row(msg.Btn("Оплатить — "+en.TutorName, "pay", studentID, en.TutorID)))
+			rows = append(rows, msg.Row(msg.Btn("Оплатить — "+en.TutorName, actions.PayOptions{StudentID: a.StudentID, TutorID: en.TutorID})))
 		}
-		rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", "home")))
+		rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", actions.Home{})))
 		r.screen(b.String(), rows...)
 		return true, nil
 
-	case "pay": // тарифы
-		studentID, tutorID := p.Int(0), p.Int(1)
-		offers, err := e.App.Offers(ctx, u, studentID, tutorID)
+	case actions.PayOptions:
+		offers, err := e.App.Offers(ctx, u, a.StudentID, a.TutorID)
 		if err != nil {
 			return true, err
 		}
@@ -186,31 +181,31 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 			if o.Product.DiscountPct > 0 {
 				label += fmt.Sprintf(" (−%d%%)", o.Product.DiscountPct)
 			}
-			rows = append(rows, msg.Row(msg.Btn(label, "pp", studentID, tutorID, o.Product.ID)))
+			rows = append(rows, msg.Row(msg.Btn(label, actions.Purchase{StudentID: a.StudentID, TutorID: a.TutorID, ProductID: o.Product.ID})))
 		}
-		rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", "py", studentID)))
+		rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", actions.Balances{StudentID: a.StudentID})))
 		r.screen("Выберите вариант оплаты.\n🧪 Сейчас оплата тестовая: деньги не списываются, уроки начисляются сразу.", rows...)
 		return true, nil
 
-	case "pp":
-		res, err := e.App.Purchase(ctx, u, p.Int(0), p.Int(1), int(p.Int(2)))
+	case actions.Purchase:
+		res, err := e.App.Purchase(ctx, u, a.StudentID, a.TutorID, a.ProductID)
 		if err != nil {
 			return true, err
 		}
-		r.screen(res, msg.Row(msg.Btn("🏠 Меню", "home")))
+		r.screen(res, msg.Row(msg.Btn("🏠 Меню", actions.Home{})))
 		return true, nil
 
-	case "pinv": // ученик приглашает родителя
+	case actions.InviteParent:
 		payload, err := e.App.CreateInvite(ctx, u, core.InviteParent)
 		if err != nil {
 			return true, err
 		}
 		r.screen("Перешлите эту ссылку родителю — после перехода аккаунты свяжутся. Ссылка одноразовая, действует 7 дней:\n\n"+e.BotLink(payload),
-			msg.Row(msg.Btn("⬅️ Назад", "home")))
+			msg.Row(msg.Btn("⬅️ Назад", actions.Home{})))
 		return true, nil
 
-	case "fb": // отзыв о пробном
-		f, err := e.App.LeaveFeedback(ctx, u, p.Int(0), p.Str(1) == "1")
+	case actions.Feedback:
+		f, err := e.App.LeaveFeedback(ctx, u, a.LessonID, a.Liked)
 		if err != nil {
 			return true, err
 		}
@@ -218,17 +213,18 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 			r.screen(f.Text)
 			return true, nil
 		}
-		rows := [][]msg.Button{msg.Row(msg.Btn("💬 Добавить комментарий", "fbc", f.ID))}
+		rows := [][]msg.Button{msg.Row(msg.Btn("💬 Добавить комментарий", actions.FeedbackComment{FeedbackID: f.ID}))}
 		if f.Liked {
-			rows = append([][]msg.Button{msg.Row(msg.Btn("🤝 Заниматься у этого репетитора", "enr", f.TutorID, f.SubjectID, f.StudentID))}, rows...)
+			rows = append([][]msg.Button{msg.Row(msg.Btn("🤝 Заниматься у этого репетитора",
+				actions.Enroll{TutorID: f.TutorID, SubjectID: f.SubjectID, StudentID: f.StudentID}))}, rows...)
 		} else {
-			rows = append(rows, msg.Row(msg.Btn("🔎 Другие репетиторы", "ns", f.StudentID, f.SubjectID)))
+			rows = append(rows, msg.Row(msg.Btn("🔎 Другие репетиторы", actions.PickTutor{StudentID: f.StudentID, SubjectID: f.SubjectID})))
 		}
 		r.screen(f.Text, rows...)
 		return true, nil
 
-	case "fbc":
-		if err := e.S.SetState(ctx, u.ID, "fbcomment", map[string]string{"fb": itoa(int(p.Int(0)))}); err != nil {
+	case actions.FeedbackComment:
+		if err := e.S.SetState(ctx, u.ID, "fbcomment", map[string]string{"fb": fmt.Sprint(a.FeedbackID)}); err != nil {
 			return true, err
 		}
 		r.send("Напишите комментарий одним сообщением. Его увидят родители и администратор школы, репетитору он напрямую не передаётся.")
@@ -237,30 +233,28 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 	return false, nil
 }
 
-func modeTitle(mode string) string {
+func modeTitle(mode actions.BookMode) string {
 	switch mode {
-	case modeTrial:
+	case actions.ModeTrial:
 		return "🎁 Пробный урок"
-	case modeRecurring:
+	case actions.ModeRecurring:
 		return "🔁 Постоянное время — урок будет повторяться каждую неделю в выбранный день и час"
 	}
 	return "📅 Разовый урок"
 }
 
 // dayRows — кнопки дней, в которых есть свободные слоты (по 2 в ряд).
-func dayRows(slots []time.Time, loc *time.Location, mk func(day string) msg.Button) [][]msg.Button {
+func dayRows(slots []time.Time, loc *time.Location, mk func(actions.Day) actions.Action) [][]msg.Button {
 	var rows [][]msg.Button
 	var row []msg.Button
-	seen := map[string]bool{}
+	seen := map[actions.Day]bool{}
 	for _, s := range slots {
-		key := dayKey(s, loc)
-		if seen[key] {
+		day := actions.DayOf(s, loc)
+		if seen[day] {
 			continue
 		}
-		seen[key] = true
-		b := mk(key)
-		b.Text = domain.FormatDay(s, loc)
-		row = append(row, b)
+		seen[day] = true
+		row = append(row, msg.Btn(domain.FormatDay(s, loc), mk(day)))
 		if len(row) == 2 {
 			rows = append(rows, row)
 			row = nil
@@ -273,14 +267,14 @@ func dayRows(slots []time.Time, loc *time.Location, mk func(day string) msg.Butt
 }
 
 // timeRows — кнопки времени выбранного дня (по 4 в ряд).
-func timeRows(slots []time.Time, day string, loc *time.Location, action func(time.Time) string) [][]msg.Button {
+func timeRows(slots []time.Time, day actions.Day, loc *time.Location, mk func(time.Time) actions.Action) [][]msg.Button {
 	var rows [][]msg.Button
 	var row []msg.Button
 	for _, s := range slots {
-		if dayKey(s, loc) != day {
+		if actions.DayOf(s, loc) != day {
 			continue
 		}
-		row = append(row, msg.Button{Text: domain.FormatTime(s, loc), Action: action(s)})
+		row = append(row, msg.Btn(domain.FormatTime(s, loc), mk(s)))
 		if len(row) == 4 {
 			rows = append(rows, row)
 			row = nil
