@@ -46,5 +46,13 @@ services:
       tg:
         condition: service_started
 
+networks:
+  default:
+    driver_opts:
+      # MTU сети контейнеров. Если сервер выходит в интернет через VPN-тоннель (WireGuard/AmneziaWG),
+      # MTU должен быть не больше, чем у тоннеля, иначе крупные пакеты TLS теряются и запросы
+      # к Telegram висят по 5+ секунд. Узнать MTU тоннеля: ip link | grep -A1 wg
+      com.docker.network.driver.mtu: ${DOCKER_MTU:-1500}
+
 volumes:
   pgdata:
