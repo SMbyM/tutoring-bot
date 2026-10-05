@@ -3,9 +3,11 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/bot ./cmd/bot
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/tg ./cmd/tg \
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker
 
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /out/bot /bot
+COPY --from=build /out/tg /out/worker /
 EXPOSE 8080
-ENTRYPOINT ["/bot"]
+# по умолчанию — Telegram-бот; воркер запускается командой /worker (см. docker-compose.yml)
+ENTRYPOINT ["/tg"]

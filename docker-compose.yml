@@ -13,8 +13,10 @@ services:
       interval: 5s
       retries: 10
 
-  bot:
+  # Telegram-адаптер: апдейты, Mini App, доставка outbox в Telegram
+  tg:
     build: .
+    image: tutoring-bot
     restart: unless-stopped
     env_file: .env
     environment:
@@ -24,6 +26,21 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:8080:8080" # Mini App; наружу — через HTTPS-прокси (Caddy/nginx)
+
+  # Фоновые задачи. Не ходит в мессенджеры — пишет в outbox. Достаточно одного экземпляра,
+  # но второй не навредит: все задачи идемпотентны.
+  worker:
+    image: tutoring-bot
+    entrypoint: ["/worker"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://bot:${POSTGRES_PASSWORD:-bot}@db:5432/bot?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+      tg:
+        condition: service_started
 
 volumes:
   pgdata:

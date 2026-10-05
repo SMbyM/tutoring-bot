@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/SMbyM/tutoring-bot/core"
 )
 
 type Config struct {
@@ -27,6 +29,12 @@ type Config struct {
 
 func (c Config) Debug() bool { return c.Env != "production" }
 
+// CoreOptions — общие настройки ядра для бота и воркера.
+func (c Config) CoreOptions() core.Options {
+	return core.Options{Debug: c.Debug(), ChannelEnabled: c.ChannelID != 0, AccessInactivity: c.AccessInactivity,
+		BookingHorizon: c.BookingHorizon, RecurringAhead: c.RecurringAhead, PolicyURL: c.PolicyURL, MiniAppURL: c.MiniAppURL}
+}
+
 func Load() (Config, error) {
 	c := Config{
 		Env:              getenv("APP_ENV", "debug"),
@@ -44,9 +52,6 @@ func Load() (Config, error) {
 	}
 	if c.Env != "debug" && c.Env != "production" {
 		return c, fmt.Errorf("APP_ENV должен быть debug или production, а не %q", c.Env)
-	}
-	if c.BotToken == "" {
-		return c, fmt.Errorf("не задан BOT_TOKEN")
 	}
 	if v := os.Getenv("CHANNEL_ID"); v != "" {
 		id, err := strconv.ParseInt(v, 10, 64)

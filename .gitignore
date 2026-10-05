@@ -1,5 +1,6 @@
 .env
-/bot
+/tg
+/worker
 *.test
 *.out
 .DS_Store

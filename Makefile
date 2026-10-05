@@ -1,9 +1,12 @@
 TEST_DATABASE_URL ?= postgres://bot:bot@localhost:5433/bot_test?sslmode=disable
 
-.PHONY: run test test-db lint up down
+.PHONY: run-tg run-worker test test-db lint up down
 
-run:
-	go run ./cmd/bot
+run-tg:
+	go run ./cmd/tg
+
+run-worker:
+	go run ./cmd/worker
 
 # Юнит-тесты без базы
 test:
