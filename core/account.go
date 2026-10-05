@@ -212,7 +212,7 @@ func (a *App) AcceptInvite(ctx context.Context, u domain.User, payload string) (
 		return "", err
 	}
 	if notifyID != 0 {
-		a.Notify(ctx, notifyID, msg.Text(notifyText))
+		a.notify(ctx, notifyID, msg.Text(notifyText))
 	}
 	return text, nil
 }

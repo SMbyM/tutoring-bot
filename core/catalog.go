@@ -20,7 +20,7 @@ type TutorOption struct {
 }
 
 func (a *App) TutorsForSubject(ctx context.Context, u domain.User, studentID int64, subjectID int) ([]TutorOption, error) {
-	if err := a.CanActForStudent(ctx, u, studentID); err != nil {
+	if err := a.canActForStudent(ctx, u, studentID); err != nil {
 		return nil, err
 	}
 	ts, err := a.S.TutorsBySubject(ctx, subjectID)
@@ -48,7 +48,7 @@ type TutorOffer struct {
 }
 
 func (a *App) TutorOffer(ctx context.Context, u domain.User, studentID int64, subjectID int, tutorID int64) (TutorOffer, error) {
-	if err := a.CanActForStudent(ctx, u, studentID); err != nil {
+	if err := a.canActForStudent(ctx, u, studentID); err != nil {
 		return TutorOffer{}, err
 	}
 	var o TutorOffer
@@ -56,7 +56,7 @@ func (a *App) TutorOffer(ctx context.Context, u domain.User, studentID int64, su
 	if o.Tutor, err = a.S.Tutor(ctx, tutorID); err != nil {
 		return o, err
 	}
-	if o.Price, err = a.TutorUnitPrice(ctx, tutorID); err != nil {
+	if o.Price, err = a.tutorUnitPrice(ctx, tutorID); err != nil {
 		return o, err
 	}
 	if o.Enrolled, err = a.S.IsEnrolled(ctx, studentID, tutorID, subjectID); err != nil {
@@ -70,7 +70,7 @@ func (a *App) TutorOffer(ctx context.Context, u domain.User, studentID int64, su
 }
 
 func (a *App) StudentLessons(ctx context.Context, u domain.User, studentID int64, limit int) ([]domain.Lesson, error) {
-	if err := a.CanActForStudent(ctx, u, studentID); err != nil {
+	if err := a.canActForStudent(ctx, u, studentID); err != nil {
 		return nil, err
 	}
 	return a.S.UpcomingForStudent(ctx, studentID, limit)
@@ -85,7 +85,7 @@ func (a *App) Lesson(ctx context.Context, u domain.User, id int64) (domain.Lesso
 	if u.ID == l.TutorID || u.EffectiveRole(a.Opt.Debug) == domain.RoleAdmin {
 		return l, nil
 	}
-	if err := a.CanActForStudent(ctx, u, l.StudentID); err != nil {
+	if err := a.canActForStudent(ctx, u, l.StudentID); err != nil {
 		return domain.Lesson{}, err
 	}
 	return l, nil
@@ -98,7 +98,7 @@ type EnrollmentBalance struct {
 
 // Balances — у каких репетиторов занимается ученик и сколько оплаченных уроков осталось.
 func (a *App) Balances(ctx context.Context, u domain.User, studentID int64) ([]EnrollmentBalance, error) {
-	if err := a.CanActForStudent(ctx, u, studentID); err != nil {
+	if err := a.canActForStudent(ctx, u, studentID); err != nil {
 		return nil, err
 	}
 	ens, err := a.S.ActiveEnrollments(ctx, studentID)
@@ -123,10 +123,10 @@ type ProductOffer struct {
 
 // Offers — активные тарифы с ценами для пары ученик–репетитор.
 func (a *App) Offers(ctx context.Context, u domain.User, studentID, tutorID int64) ([]ProductOffer, error) {
-	if err := a.CanActForStudent(ctx, u, studentID); err != nil {
+	if err := a.canActForStudent(ctx, u, studentID); err != nil {
 		return nil, err
 	}
-	unit, err := a.TutorUnitPrice(ctx, tutorID)
+	unit, err := a.tutorUnitPrice(ctx, tutorID)
 	if err != nil {
 		return nil, err
 	}

@@ -19,7 +19,7 @@ func TestPermissionsEnforcedInCore(t *testing.T) {
 	price := int64(100000)
 	slots, _, err := a.FreeSlots(ctx, e.kid, e.tutor.ID, e.kid.ID, 0)
 	must(t, err)
-	trial, err := a.BookTrial(ctx, e.kid, e.kid.ID, e.tutor.ID, e.math, slots[0])
+	trial, err := bookLesson(a, ctx, core.BookTrial, e.kid, e.kid.ID, e.tutor.ID, e.math, slots[0])
 	must(t, err)
 
 	cases := []struct {

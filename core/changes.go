@@ -36,7 +36,7 @@ func (a *App) RequestChange(ctx context.Context, u domain.User, lessonID int64, 
 	if l.Status != domain.StatusScheduled {
 		return 0, domain.ErrNotScheduled
 	}
-	act, err := a.ActorFor(ctx, u, l)
+	act, err := a.actorFor(ctx, u, l)
 	if err != nil {
 		return 0, err
 	}
@@ -99,7 +99,7 @@ func (a *App) askParents(ctx context.Context, reqID int64, l domain.Lesson, kind
 	}
 	m := msg.Message{Text: text, Buttons: [][]msg.Button{msg.Row(
 		msg.Btn("✅ Разрешить", actions.DecideRequest{RequestID: reqID, Approve: true}), msg.Btn("❌ Отклонить", actions.DecideRequest{RequestID: reqID}))}}
-	a.NotifyMany(ctx, parents, m)
+	a.notifyMany(ctx, parents, m)
 }
 
 // DecideRequest — решение родителя по запросу ребёнка. Кто первый из родителей ответил, тот и решил.
@@ -123,7 +123,7 @@ func (a *App) DecideRequest(ctx context.Context, parent domain.User, reqID int64
 		return "Этот запрос уже решён.", nil
 	}
 	if !approve {
-		a.Notify(ctx, r.RequestedBy, msg.Text("🙅 Родитель не одобрил изменение урока:\n"+LessonLine(l, domain.LoadLocation(""), true, false)))
+		a.notify(ctx, r.RequestedBy, msg.Text("🙅 Родитель не одобрил изменение урока:\n"+LessonLine(l, domain.LoadLocation(""), true, false)))
 		return "Отклонено, ребёнок получит уведомление.", nil
 	}
 	var ns time.Time
@@ -180,7 +180,7 @@ func (a *App) applyChange(ctx context.Context, u domain.User, l domain.Lesson, k
 			others = append(others, id)
 		}
 	}
-	a.NotifyMany(ctx, others, msg.Text(text))
+	a.notifyMany(ctx, others, msg.Text(text))
 	return nil
 }
 
@@ -191,7 +191,7 @@ func (a *App) StopRecurring(ctx context.Context, u domain.User, slotID int64) (i
 		return 0, err
 	}
 	if u.ID != r.TutorID && u.EffectiveRole(a.Opt.Debug) != domain.RoleAdmin {
-		if err := a.CanActForStudent(ctx, u, r.StudentID); err != nil {
+		if err := a.canActForStudent(ctx, u, r.StudentID); err != nil {
 			return 0, err
 		}
 	}
@@ -206,6 +206,6 @@ func (a *App) StopRecurring(ctx context.Context, u domain.User, slotID int64) (i
 			others = append(others, id)
 		}
 	}
-	a.NotifyMany(ctx, others, msg.Text(fmt.Sprintf("🗓 %s отменил(а) постоянное расписание ученика %s. Отменено будущих уроков: %d", u.Name, st.Name, n)))
+	a.notifyMany(ctx, others, msg.Text(fmt.Sprintf("🗓 %s отменил(а) постоянное расписание ученика %s. Отменено будущих уроков: %d", u.Name, st.Name, n)))
 	return n, nil
 }

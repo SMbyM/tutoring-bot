@@ -11,10 +11,10 @@ import (
 	"github.com/SMbyM/tutoring-bot/store"
 )
 
-// SyncAccess приводит доступ ученика в канал к правилу domain.AccessEligible.
+// syncAccess приводит доступ ученика в канал к правилу domain.AccessEligible.
 // Выдача и исключение идемпотентны: параллельные процессы не пришлют две ссылки.
 // Саму ссылку создаёт адаптер мессенджера при обработке записи outbox.
-func (a *App) SyncAccess(ctx context.Context, studentID int64) error {
+func (a *App) syncAccess(ctx context.Context, studentID int64) error {
 	if !a.Opt.ChannelEnabled {
 		return nil
 	}
@@ -49,26 +49,26 @@ func (a *App) SyncAccess(ctx context.Context, studentID int64) error {
 				return err
 			}
 		}
-		a.Notify(ctx, studentID, msg.Text("Доступ к закрытому каналу приостановлен: давно не было занятий. Запишитесь на урок — доступ вернётся автоматически."))
+		a.notify(ctx, studentID, msg.Text("Доступ к закрытому каналу приостановлен: давно не было занятий. Запишитесь на урок — доступ вернётся автоматически."))
 	}
 	return nil
 }
 
-func (a *App) SyncAllAccess(ctx context.Context) error {
+func (a *App) syncAllAccess(ctx context.Context) error {
 	ids, err := a.S.AccessCandidates(ctx)
 	if err != nil {
 		return err
 	}
 	for _, id := range ids {
-		if err := a.SyncAccess(ctx, id); err != nil {
+		if err := a.syncAccess(ctx, id); err != nil {
 			a.Log.Warn("синхронизация доступа", "user", id, "err", err)
 		}
 	}
 	return nil
 }
 
-// PromptMarks — после окончания урока спрашиваем репетитора, состоялся ли он.
-func (a *App) PromptMarks(ctx context.Context) error {
+// promptMarks — после окончания урока спрашиваем репетитора, состоялся ли он.
+func (a *App) promptMarks(ctx context.Context) error {
 	ls, err := a.S.LessonsToPrompt(ctx, a.Now())
 	if err != nil {
 		return err
@@ -85,7 +85,7 @@ func (a *App) PromptMarks(ctx context.Context) error {
 		if err != nil {
 			continue
 		}
-		a.Notify(ctx, l.TutorID, msg.Message{
+		a.notify(ctx, l.TutorID, msg.Message{
 			Text: "Как прошёл урок?\n" + LessonLine(l, t.Location(), false, true) + "\n(без ответа через 24 часа урок будет считаться состоявшимся)",
 			Buttons: [][]msg.Button{
 				msg.Row(msg.Btn("✅ Состоялся", actions.MarkLesson{LessonID: l.ID, Mark: actions.MarkHeld})),
@@ -95,8 +95,8 @@ func (a *App) PromptMarks(ctx context.Context) error {
 	return nil
 }
 
-// AutoHold — неотмеченные уроки через сутки считаются состоявшимися.
-func (a *App) AutoHold(ctx context.Context) error {
+// autoHold — неотмеченные уроки через сутки считаются состоявшимися.
+func (a *App) autoHold(ctx context.Context) error {
 	ls, err := a.S.LessonsToAutoHold(ctx, a.Now())
 	if err != nil {
 		return err
@@ -117,8 +117,8 @@ func (a *App) AutoHold(ctx context.Context) error {
 // MorningHour — во сколько по местному времени получателя приходит утреннее напоминание.
 const MorningHour = 8
 
-// SendReminders — утром в день урока (всем) и за час (ученику и репетитору), с учётом настроек и поясов.
-func (a *App) SendReminders(ctx context.Context) error {
+// sendReminders — утром в день урока (всем) и за час (ученику и репетитору), с учётом настроек и поясов.
+func (a *App) sendReminders(ctx context.Context) error {
 	now := a.Now()
 	ls, err := a.S.LessonsStartingBetween(ctx, now, now.Add(36*time.Hour))
 	if err != nil {
@@ -183,28 +183,32 @@ func (a *App) maybeRemind(ctx context.Context, l domain.Lesson, lessonLoc *time.
 	} else {
 		text = "⏰ Через час урок: " + LessonLine(l, loc, withTutor, withStudent)
 	}
-	a.Notify(ctx, uid, msg.Text(text))
+	a.notify(ctx, uid, msg.Text(text))
 }
 
 // Tick — один проход всех фоновых задач.
+// Порядок фиксирован: сначала спросить про закончившиеся уроки, затем закрыть старые, затем напомнить о будущих.
 func (a *App) Tick(ctx context.Context) {
-	for name, job := range map[string]func(context.Context) error{
-		"reminders": a.SendReminders,
-		"prompt":    a.PromptMarks,
-		"autohold":  a.AutoHold,
+	for _, job := range []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{"prompt", a.promptMarks},
+		{"autohold", a.autoHold},
+		{"reminders", a.sendReminders},
 	} {
-		if err := job(ctx); err != nil {
-			a.Log.Error("фоновая задача", "job", name, "err", err)
+		if err := job.run(ctx); err != nil {
+			a.Log.Error("фоновая задача", "job", job.name, "err", err)
 		}
 	}
 }
 
 // DailyTick — задачи раз в несколько часов: продление слотов и синхронизация доступа.
 func (a *App) DailyTick(ctx context.Context) {
-	if err := a.ExtendRecurring(ctx); err != nil {
+	if err := a.extendRecurring(ctx); err != nil {
 		a.Log.Error("продление слотов", "err", err)
 	}
-	if err := a.SyncAllAccess(ctx); err != nil {
+	if err := a.syncAllAccess(ctx); err != nil {
 		a.Log.Error("доступ в канал", "err", err)
 	}
 	if err := a.S.PurgeOutbox(ctx, 14*24*time.Hour); err != nil {
