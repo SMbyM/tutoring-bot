@@ -48,26 +48,26 @@ func (e *Engine) parentAction(r *req, act actions.Action) (bool, error) {
 		return true, nil
 
 	case actions.AddChild:
-		if err := e.S.SetState(ctx, u.ID, "kidname", nil); err != nil {
+		if err := e.ask(r, askChildName{}); err != nil {
 			return true, err
 		}
 		r.screen("Как зовут ребёнка? Напишите имя.\nВсе уведомления для него будут приходить вам.")
 		return true, nil
 
 	case actions.ChildGrade: // класс ребёнка без Telegram → создаём аккаунт
-		state, data, err := e.S.State(ctx, u.ID)
+		q, ok, err := pending[askChildGrade](e, r)
 		if err != nil {
 			return true, err
 		}
-		if state != "kidgrade" || data["name"] == "" {
+		if !ok {
 			return true, e.home(r)
 		}
-		id, err := e.App.AddManagedChild(ctx, u, data["name"], a.Grade)
+		id, err := e.App.AddManagedChild(ctx, u, q.Name, a.Grade)
 		if err != nil {
 			return true, err
 		}
-		_ = e.S.ClearState(ctx, u.ID)
-		r.screen("✅ "+data["name"]+" добавлен(а). Теперь можно записать на пробный урок.",
+		_ = e.forget(r)
+		r.screen("✅ "+q.Name+" добавлен(а). Теперь можно записать на пробный урок.",
 			msg.Row(msg.Btn("➕ Записать", actions.PickSubject{StudentID: id})), msg.Row(msg.Btn("🏠 Меню", actions.Home{})))
 		return true, nil
 	}

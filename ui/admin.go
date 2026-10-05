@@ -48,7 +48,7 @@ func (e *Engine) adminAction(r *req, act actions.Action) (bool, error) {
 		return true, e.adminTutorCard(r, a.TutorID)
 
 	case actions.AskTutorPrice:
-		if err := e.S.SetState(ctx, u.ID, "aprice", map[string]string{"tutor": strconv.FormatInt(a.TutorID, 10)}); err != nil {
+		if err := e.ask(r, askTutorPrice{TutorID: a.TutorID}); err != nil {
 			return true, err
 		}
 		r.screen("Введите цену одного урока этого репетитора в рублях, например 1800.")
@@ -72,7 +72,7 @@ func (e *Engine) adminAction(r *req, act actions.Action) (bool, error) {
 		return true, e.adminPrices(r)
 
 	case actions.AskBasePrice:
-		if err := e.S.SetState(ctx, u.ID, "abase", nil); err != nil {
+		if err := e.ask(r, askBasePrice{}); err != nil {
 			return true, err
 		}
 		r.screen("Введите общую цену одного урока в рублях, например 1500.\nУже купленные пакеты и абонементы не изменятся.")
@@ -85,7 +85,7 @@ func (e *Engine) adminAction(r *req, act actions.Action) (bool, error) {
 		return true, e.adminPrices(r)
 
 	case actions.AskProduct:
-		if err := e.S.SetState(ctx, u.ID, "aproduct", nil); err != nil {
+		if err := e.ask(r, askProduct{}); err != nil {
 			return true, err
 		}
 		r.screen("Новый тариф одним сообщением:\nНазвание; число уроков; скидка %; срок в днях (0 — бессрочно)\n\nНапример:\nПакет 4 урока; 4; 3; 0\nАбонемент на 2 месяца; 16; 12; 62")
@@ -164,7 +164,7 @@ func (e *Engine) adminAction(r *req, act actions.Action) (bool, error) {
 		return true, nil
 
 	case actions.AskSubject:
-		if err := e.S.SetState(ctx, u.ID, "asubject", nil); err != nil {
+		if err := e.ask(r, askSubject{}); err != nil {
 			return true, err
 		}
 		r.screen("Название нового предмета?")
@@ -225,56 +225,6 @@ func (e *Engine) adminPrices(r *req) error {
 	rows = append(rows, msg.Row(msg.Btn("➕ Новый тариф", actions.AskProduct{})), msg.Row(msg.Btn("⬅️ Назад", actions.Home{})))
 	r.screen(b.String(), rows...)
 	return nil
-}
-
-func (e *Engine) adminText(r *req, state string, data map[string]string, text string) (bool, error) {
-	switch state {
-	case "aprice", "abase", "aproduct", "asubject":
-	default:
-		return false, nil
-	}
-	ctx, u := r.ctx, r.u
-	switch state {
-	case "aprice":
-		v, err := domain.ParseRub(text)
-		if err != nil {
-			return true, uerr(err)
-		}
-		id := atoi64(data["tutor"])
-		if err := e.App.SetTutorPrice(ctx, u, id, &v); err != nil {
-			return true, err
-		}
-		_ = e.S.ClearState(ctx, u.ID)
-		return true, e.adminTutorCard(r, id)
-	case "abase":
-		v, err := domain.ParseRub(text)
-		if err != nil {
-			return true, uerr(err)
-		}
-		if err := e.App.SetBasePrice(ctx, u, v); err != nil {
-			return true, err
-		}
-		_ = e.S.ClearState(ctx, u.ID)
-		return true, e.adminPrices(r)
-	case "aproduct":
-		p, err := parseProduct(text)
-		if err != nil {
-			return true, uerr(err)
-		}
-		if err := e.App.AddProduct(ctx, u, p); err != nil {
-			return true, err
-		}
-		_ = e.S.ClearState(ctx, u.ID)
-		return true, e.adminPrices(r)
-	case "asubject":
-		if err := e.App.AddSubject(ctx, u, text); err != nil {
-			return true, err
-		}
-		_ = e.S.ClearState(ctx, u.ID)
-		_, err := e.adminAction(r, actions.Subjects{})
-		return true, err
-	}
-	return true, nil
 }
 
 // parseProduct: «Название; уроков; скидка; дней».

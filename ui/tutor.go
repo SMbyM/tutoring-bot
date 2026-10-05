@@ -104,7 +104,7 @@ func (e *Engine) tutorAction(r *req, act actions.Action) (bool, error) {
 		if len(sc.Windows) > 0 {
 			cur = "\n\nСейчас:\n" + domain.FormatWindows(sc.Windows)
 		}
-		if err := e.S.SetState(ctx, u.ID, "windows", nil); err != nil {
+		if err := e.ask(r, askWindows{}); err != nil {
 			return true, err
 		}
 		r.screen("Отправьте окна одним сообщением, по строке на окно. Это заменит текущее расписание. Например:\n\nпн 15:00-19:00\nср, пт 10:00-13:00\nсб 11:00-15:00" + cur + "\n\n(/menu — отмена)")
@@ -113,7 +113,7 @@ func (e *Engine) tutorAction(r *req, act actions.Action) (bool, error) {
 		if _, err := e.App.MySchedule(ctx, u); err != nil {
 			return true, err
 		}
-		if err := e.S.SetState(ctx, u.ID, "exception", nil); err != nil {
+		if err := e.ask(r, askException{}); err != nil {
 			return true, err
 		}
 		r.screen("Когда вы недоступны? Например:\n\n20.10-26.10 отпуск\n03.11 сессия\n\n(/menu — отмена)")
@@ -145,7 +145,7 @@ func (e *Engine) tutorAction(r *req, act actions.Action) (bool, error) {
 		if _, err := e.App.MySchedule(ctx, u); err != nil {
 			return true, err
 		}
-		if err := e.S.SetState(ctx, u.ID, "bio", nil); err != nil {
+		if err := e.ask(r, askBio{}); err != nil {
 			return true, err
 		}
 		r.screen("Напишите пару предложений о себе: опыт, с какими классами работаете, к чему готовите.")
@@ -159,41 +159,6 @@ func (e *Engine) tutorAction(r *req, act actions.Action) (bool, error) {
 		if err := e.App.ToggleSubject(ctx, u, a.SubjectID); err != nil {
 			return true, err
 		}
-		return true, e.tutorProfile(r)
-	}
-	return false, nil
-}
-
-func (e *Engine) tutorText(r *req, state string, _ map[string]string, text string) (bool, error) {
-	ctx, u := r.ctx, r.u
-	switch state {
-	case "windows":
-		ws, err := domain.ParseWindows(text)
-		if err != nil {
-			return true, uerr(err)
-		}
-		if err := e.App.SetWindows(ctx, u, ws); err != nil {
-			return true, err
-		}
-		_ = e.S.ClearState(ctx, u.ID)
-		r.send("✅ Расписание сохранено. Уже записанные уроки не меняются.")
-		return true, e.tutorWindows(r)
-	case "exception":
-		from, to, note, err := parseException(text, e.App.Now(), r.loc())
-		if err != nil {
-			return true, uerr(err)
-		}
-		if err := e.App.AddException(ctx, u, from, to, note); err != nil {
-			return true, err
-		}
-		_ = e.S.ClearState(ctx, u.ID)
-		r.send("✅ Добавлено. В эти дни записаться к вам не получится. Уже записанные уроки на эти даты перенесите или отмените вручную.")
-		return true, e.tutorWindows(r)
-	case "bio":
-		if err := e.App.SetBio(ctx, u, text); err != nil {
-			return true, err
-		}
-		_ = e.S.ClearState(ctx, u.ID)
 		return true, e.tutorProfile(r)
 	}
 	return false, nil
