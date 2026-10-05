@@ -15,7 +15,7 @@ import (
 // Смотреть может сам ученик, его родитель, админ или этот репетитор (например, для переноса).
 func (a *App) FreeSlots(ctx context.Context, u domain.User, tutorID, studentID int64, excludeLesson int64) ([]time.Time, store.Tutor, error) {
 	if u.ID != tutorID {
-		if err := a.CanActForStudent(ctx, u, studentID); err != nil {
+		if err := a.canActForStudent(ctx, u, studentID); err != nil {
 			return nil, store.Tutor{}, err
 		}
 	}
@@ -82,18 +82,49 @@ func (a *App) checkSlot(ctx context.Context, s *store.Store, t store.Tutor, stud
 	return nil
 }
 
-// BookTrial — пробный урок: один на пару ученик–репетитор, бесплатный.
-func (a *App) BookTrial(ctx context.Context, actor domain.User, studentID, tutorID int64, subjectID int, start time.Time) (domain.Lesson, error) {
-	return a.book(ctx, actor, studentID, tutorID, subjectID, start, domain.KindTrial)
+// BookingMode — что именно бронируем.
+type BookingMode string
+
+const (
+	BookTrial     BookingMode = "trial"     // пробный: один на пару ученик–репетитор, бесплатный
+	BookOnce      BookingMode = "once"      // разовый урок у закреплённого репетитора
+	BookRecurring BookingMode = "recurring" // постоянное время: каждую неделю, уроки создаются на RecurringAhead вперёд
+)
+
+type BookingRequest struct {
+	Mode      BookingMode
+	StudentID int64
+	TutorID   int64
+	SubjectID int
+	Start     time.Time
 }
 
-// BookOnce — разовый урок у закреплённого репетитора.
-func (a *App) BookOnce(ctx context.Context, actor domain.User, studentID, tutorID int64, subjectID int, start time.Time) (domain.Lesson, error) {
-	return a.book(ctx, actor, studentID, tutorID, subjectID, start, domain.KindRegular)
+// Booking — результат записи.
+type Booking struct {
+	Lesson  domain.Lesson // для пробного и разового — созданный урок
+	SlotID  int64         // для постоянного времени — id слота
+	Created int           // для постоянного времени — сколько уроков создано вперёд
+}
+
+// Book — единственный вход для записи на занятия. Права: сам ученик, его родитель или админ.
+func (a *App) Book(ctx context.Context, actor domain.User, req BookingRequest) (Booking, error) {
+	switch req.Mode {
+	case BookTrial, BookOnce:
+		kind := domain.KindRegular
+		if req.Mode == BookTrial {
+			kind = domain.KindTrial
+		}
+		l, err := a.book(ctx, actor, req.StudentID, req.TutorID, req.SubjectID, req.Start, kind)
+		return Booking{Lesson: l}, err
+	case BookRecurring:
+		id, n, err := a.bookRecurring(ctx, actor, req.StudentID, req.TutorID, req.SubjectID, req.Start)
+		return Booking{SlotID: id, Created: n}, err
+	}
+	return Booking{}, domain.InputError(fmt.Sprintf("неизвестный режим записи %q", req.Mode))
 }
 
 func (a *App) book(ctx context.Context, actor domain.User, studentID, tutorID int64, subjectID int, start time.Time, kind domain.LessonKind) (domain.Lesson, error) {
-	if err := a.CanActForStudent(ctx, actor, studentID); err != nil {
+	if err := a.canActForStudent(ctx, actor, studentID); err != nil {
 		return domain.Lesson{}, err
 	}
 	var id int64
@@ -158,12 +189,12 @@ func (a *App) announceBooking(ctx context.Context, actor domain.User, l domain.L
 			others = append(others, id)
 		}
 	}
-	a.NotifyMany(ctx, others, msg.Text(text))
+	a.notifyMany(ctx, others, msg.Text(text))
 }
 
-// BookRecurring — постоянный слот (каждую неделю в это же время), уроки создаются на RecurringAhead вперёд.
-func (a *App) BookRecurring(ctx context.Context, actor domain.User, studentID, tutorID int64, subjectID int, start time.Time) (int64, int, error) {
-	if err := a.CanActForStudent(ctx, actor, studentID); err != nil {
+// bookRecurring — постоянный слот (каждую неделю в это же время), уроки создаются на RecurringAhead вперёд.
+func (a *App) bookRecurring(ctx context.Context, actor domain.User, studentID, tutorID int64, subjectID int, start time.Time) (int64, int, error) {
+	if err := a.canActForStudent(ctx, actor, studentID); err != nil {
 		return 0, 0, err
 	}
 	var slotID int64
@@ -213,7 +244,7 @@ func (a *App) BookRecurring(ctx context.Context, actor domain.User, studentID, t
 				others = append(others, id)
 			}
 		}
-		a.NotifyMany(ctx, others, msg.Text(text))
+		a.notifyMany(ctx, others, msg.Text(text))
 	}
 	return slotID, created, nil
 }
@@ -242,8 +273,8 @@ func (a *App) materialize(ctx context.Context, s *store.Store, r store.Recurring
 	return created, nil
 }
 
-// ExtendRecurring — фоновая задача: досоздаёт уроки постоянных слотов на горизонт вперёд.
-func (a *App) ExtendRecurring(ctx context.Context) error {
+// extendRecurring — фоновая задача: досоздаёт уроки постоянных слотов на горизонт вперёд.
+func (a *App) extendRecurring(ctx context.Context) error {
 	slots, err := a.S.ActiveRecurring(ctx)
 	if err != nil {
 		return err

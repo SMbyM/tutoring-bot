@@ -8,8 +8,8 @@ import (
 	"github.com/SMbyM/tutoring-bot/store"
 )
 
-// TutorUnitPrice — цена урока у репетитора (общая или индивидуальная), копейки.
-func (a *App) TutorUnitPrice(ctx context.Context, tutorID int64) (int64, error) {
+// tutorUnitPrice — цена урока у репетитора (общая или индивидуальная), копейки.
+func (a *App) tutorUnitPrice(ctx context.Context, tutorID int64) (int64, error) {
 	base, err := a.S.BasePrice(ctx)
 	if err != nil {
 		return 0, err
@@ -24,7 +24,7 @@ func (a *App) TutorUnitPrice(ctx context.Context, tutorID int64) (int64, error) 
 // Purchase — ЗАГЛУШКА оплаты: записывает платёж и начисляет уроки в журнал, деньги не списываются.
 // Цена урока фиксируется в журнале на момент покупки.
 func (a *App) Purchase(ctx context.Context, payer domain.User, studentID, tutorID int64, productID int) (string, error) {
-	if err := a.CanActForStudent(ctx, payer, studentID); err != nil {
+	if err := a.canActForStudent(ctx, payer, studentID); err != nil {
 		return "", err
 	}
 	p, err := a.S.Product(ctx, productID)
@@ -34,7 +34,7 @@ func (a *App) Purchase(ctx context.Context, payer domain.User, studentID, tutorI
 	if !p.Active {
 		return "", domain.ErrNotFound
 	}
-	unit, err := a.TutorUnitPrice(ctx, tutorID)
+	unit, err := a.tutorUnitPrice(ctx, tutorID)
 	if err != nil {
 		return "", err
 	}

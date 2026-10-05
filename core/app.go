@@ -69,8 +69,8 @@ func (a *App) recipient(ctx context.Context, userID int64) (store.Identity, stri
 	return id, "👤 " + u.Name + "\n", nil
 }
 
-// Notify ставит сообщение пользователю в очередь отправки.
-func (a *App) Notify(ctx context.Context, userID int64, m msg.Message) {
+// notify ставит сообщение пользователю в очередь отправки.
+func (a *App) notify(ctx context.Context, userID int64, m msg.Message) {
 	a.enqueue(ctx, userID, store.OutMessage, m)
 }
 
@@ -86,15 +86,15 @@ func (a *App) enqueue(ctx context.Context, userID int64, kind store.OutboxKind, 
 	}
 }
 
-// NotifyMany — без повторов.
-func (a *App) NotifyMany(ctx context.Context, ids []int64, m msg.Message) {
+// notifyMany — без повторов.
+func (a *App) notifyMany(ctx context.Context, ids []int64, m msg.Message) {
 	seen := map[int64]bool{}
 	for _, id := range ids {
 		if id == 0 || seen[id] {
 			continue
 		}
 		seen[id] = true
-		a.Notify(ctx, id, m)
+		a.notify(ctx, id, m)
 	}
 }
 
@@ -124,8 +124,8 @@ func (a *App) adminIDs(ctx context.Context) []int64 {
 	return ids
 }
 
-// ActorFor — кто пользователь по отношению к уроку.
-func (a *App) ActorFor(ctx context.Context, u domain.User, l domain.Lesson) (domain.Actor, error) {
+// actorFor — кто пользователь по отношению к уроку.
+func (a *App) actorFor(ctx context.Context, u domain.User, l domain.Lesson) (domain.Actor, error) {
 	role := u.EffectiveRole(a.Opt.Debug)
 	act := domain.Actor{UserID: u.ID, Role: role, IsSelf: u.ID == l.StudentID, IsTutor: u.ID == l.TutorID}
 	if role == domain.RoleParent {
@@ -138,8 +138,8 @@ func (a *App) ActorFor(ctx context.Context, u domain.User, l domain.Lesson) (dom
 	return act, nil
 }
 
-// CanActForStudent — может ли пользователь записывать/оплачивать за ученика.
-func (a *App) CanActForStudent(ctx context.Context, u domain.User, studentID int64) error {
+// canActForStudent — может ли пользователь записывать/оплачивать за ученика.
+func (a *App) canActForStudent(ctx context.Context, u domain.User, studentID int64) error {
 	if u.ID == studentID || u.EffectiveRole(a.Opt.Debug) == domain.RoleAdmin {
 		return nil
 	}

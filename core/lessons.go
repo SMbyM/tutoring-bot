@@ -46,7 +46,7 @@ func (a *App) MarkLesson(ctx context.Context, u domain.User, lessonID int64, mar
 		if !ok {
 			return "Урок уже отмечен.", nil
 		}
-		a.NotifyMany(ctx, append([]int64{l.StudentID}, a.parentIDs(ctx, l.StudentID)...),
+		a.notifyMany(ctx, append([]int64{l.StudentID}, a.parentIDs(ctx, l.StudentID)...),
 			msg.Text("⚠️ Репетитор отметил, что ученик не пришёл на урок:\n"+LessonLine(l, loc, true, false)))
 		return "Отмечено: ученик не пришёл.", nil
 	case "moved":
@@ -55,7 +55,7 @@ func (a *App) MarkLesson(ctx context.Context, u domain.User, lessonID int64, mar
 		}
 		m := msg.Message{Text: "🔄 Репетитор отметил, что урок перенесён:\n" + LessonLine(l, loc, true, false) +
 			"\nВыберите новое время.", Buttons: [][]msg.Button{msg.Row(msg.Btn("📅 Выбрать время", actions.PickDay{TutorID: l.TutorID, SubjectID: l.SubjectID, StudentID: l.StudentID, Mode: actions.ModeOnce}))}}
-		a.NotifyMany(ctx, append([]int64{l.StudentID}, a.parentIDs(ctx, l.StudentID)...), m)
+		a.notifyMany(ctx, append([]int64{l.StudentID}, a.parentIDs(ctx, l.StudentID)...), m)
 		return "Отмечено: перенесён. Ученику предложено выбрать новое время.", nil
 	}
 	return "", fmt.Errorf("неизвестная отметка %q", mark)
@@ -69,7 +69,7 @@ func (a *App) onHeld(ctx context.Context, l domain.Lesson) {
 		}
 		bal, err := a.S.Balance(ctx, l.StudentID, l.TutorID)
 		if err == nil && bal <= 0 {
-			a.NotifyMany(ctx, append([]int64{l.StudentID}, a.parentIDs(ctx, l.StudentID)...),
+			a.notifyMany(ctx, append([]int64{l.StudentID}, a.parentIDs(ctx, l.StudentID)...),
 				msg.Message{Text: fmt.Sprintf("💳 Оплаченные уроки у репетитора %s закончились (баланс: %d).", l.TutorName, bal),
 					Buttons: [][]msg.Button{msg.Row(msg.Btn("Оплатить", actions.PayOptions{StudentID: l.StudentID, TutorID: l.TutorID}))}})
 		}
@@ -78,7 +78,7 @@ func (a *App) onHeld(ctx context.Context, l domain.Lesson) {
 	text := fmt.Sprintf("Как прошёл пробный урок у репетитора %s (%s)?\nОт ответа зависит доступ к закрытому каналу с материалами.", l.TutorName, l.Subject)
 	m := msg.Message{Text: text, Buttons: [][]msg.Button{msg.Row(
 		msg.Btn("👍 Понравился", actions.Feedback{LessonID: l.ID, Liked: true}), msg.Btn("👎 Не понравился", actions.Feedback{LessonID: l.ID}))}}
-	a.Notify(ctx, l.StudentID, m)
+	a.notify(ctx, l.StudentID, m)
 }
 
 // LeaveFeedback — отзыв о пробном. Видят родитель и админ; админ решает, передавать ли репетитору.
@@ -100,7 +100,7 @@ func (a *App) LeaveFeedback(ctx context.Context, u domain.User, lessonID int64, 
 	if l.Kind != domain.KindTrial || l.Status != domain.StatusHeld {
 		return FeedbackResult{}, domain.ErrNotAllowed
 	}
-	if err := a.CanActForStudent(ctx, u, l.StudentID); err != nil {
+	if err := a.canActForStudent(ctx, u, l.StudentID); err != nil {
 		return FeedbackResult{}, err
 	}
 	res := FeedbackResult{Liked: liked, TutorID: l.TutorID, SubjectID: l.SubjectID, StudentID: l.StudentID}
@@ -121,11 +121,11 @@ func (a *App) LeaveFeedback(ctx context.Context, u domain.User, lessonID int64, 
 			parents = append(parents, p)
 		}
 	}
-	a.NotifyMany(ctx, parents, msg.Text(text))
-	a.NotifyMany(ctx, a.adminIDs(ctx), msg.Message{Text: text,
+	a.notifyMany(ctx, parents, msg.Text(text))
+	a.notifyMany(ctx, a.adminIDs(ctx), msg.Message{Text: text,
 		Buttons: [][]msg.Button{msg.Row(msg.Btn("📨 Сообщить репетитору", actions.ForwardFeedback{FeedbackID: id}))}})
 	if liked {
-		if err := a.SyncAccess(ctx, l.StudentID); err != nil {
+		if err := a.syncAccess(ctx, l.StudentID); err != nil {
 			a.Log.Warn("доступ в канал", "err", err)
 		}
 		res.Text = "Спасибо! Можно закрепиться за этим репетитором и записаться на постоянные занятия."
@@ -142,7 +142,7 @@ func (a *App) SetFeedbackComment(ctx context.Context, u domain.User, fbID int64,
 	if err != nil {
 		return FeedbackResult{}, err
 	}
-	if err := a.CanActForStudent(ctx, u, f.StudentID); err != nil {
+	if err := a.canActForStudent(ctx, u, f.StudentID); err != nil {
 		return FeedbackResult{}, err
 	}
 	comment = strings.TrimSpace(comment)
@@ -166,7 +166,7 @@ func (a *App) SetFeedbackComment(ctx context.Context, u domain.User, fbID int64,
 			parents = append(parents, p)
 		}
 	}
-	a.NotifyMany(ctx, append(parents, a.adminIDs(ctx)...), msg.Text(text))
+	a.notifyMany(ctx, append(parents, a.adminIDs(ctx)...), msg.Text(text))
 	return FeedbackResult{ID: f.ID, Liked: f.Liked, TutorID: f.TutorID, SubjectID: l.SubjectID, StudentID: f.StudentID}, nil
 }
 
@@ -192,13 +192,13 @@ func (a *App) ForwardFeedback(ctx context.Context, admin domain.User, fbID int64
 	} else {
 		text = fmt.Sprintf("Ученик %s решил пока не продолжать занятия после пробного урока. Так бывает — дело в подходящем формате, а не в вас.", f.StudentName)
 	}
-	a.Notify(ctx, f.TutorID, msg.Text(text))
+	a.notify(ctx, f.TutorID, msg.Text(text))
 	return "Передано репетитору.", nil
 }
 
 // Enroll — ученик закрепляется за репетитором по предмету (нужен понравившийся пробный у него).
 func (a *App) Enroll(ctx context.Context, u domain.User, studentID, tutorID int64, subjectID int) error {
-	if err := a.CanActForStudent(ctx, u, studentID); err != nil {
+	if err := a.canActForStudent(ctx, u, studentID); err != nil {
 		return err
 	}
 	liked, err := a.S.LikedTutor(ctx, studentID, tutorID)
@@ -213,9 +213,9 @@ func (a *App) Enroll(ctx context.Context, u domain.User, studentID, tutorID int6
 		return err
 	}
 	st, _ := a.S.UserByID(ctx, studentID)
-	a.Notify(ctx, tutorID, msg.Text(fmt.Sprintf("🤝 Ученик %s теперь занимается у вас.", st.Name)))
+	a.notify(ctx, tutorID, msg.Text(fmt.Sprintf("🤝 Ученик %s теперь занимается у вас.", st.Name)))
 	if prev != 0 {
-		a.Notify(ctx, prev, msg.Text(fmt.Sprintf("Ученик %s перешёл к другому репетитору. Его постоянное расписание у вас отменено.", st.Name)))
+		a.notify(ctx, prev, msg.Text(fmt.Sprintf("Ученик %s перешёл к другому репетитору. Его постоянное расписание у вас отменено.", st.Name)))
 	}
 	return nil
 }

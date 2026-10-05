@@ -172,27 +172,27 @@ func TestFullFlow(t *testing.T) {
 		t.Fatal("нет свободных окон")
 	}
 	start := slots[len(slots)/2] // где-то в середине горизонта: точно больше 12 часов вперёд
-	trial, err := a.BookTrial(ctx, e.kid, e.kid.ID, e.tutor.ID, e.math, start)
+	trial, err := bookLesson(a, ctx, core.BookTrial, e.kid, e.kid.ID, e.tutor.ID, e.math, start)
 	must(t, err)
 	if !hasText(e.snd.take("tutor"), "пробный") || !hasText(e.snd.take("mom"), "пробный") {
 		t.Error("репетитор и родитель должны узнать о записи на пробный")
 	}
-	if _, err := a.BookTrial(ctx, e.kid, e.kid.ID, e.tutor.ID, e.math, start.Add(2*time.Hour)); !errors.Is(err, domain.ErrTrialUsed) {
+	if _, err := bookLesson(a, ctx, core.BookTrial, e.kid, e.kid.ID, e.tutor.ID, e.math, start.Add(2*time.Hour)); !errors.Is(err, domain.ErrTrialUsed) {
 		t.Errorf("второй пробный: %v", err)
 	}
-	if _, err := a.BookTrial(ctx, e.kid2, e.kid2.ID, e.tutor.ID, e.math, start); !errors.Is(err, domain.ErrSlotTaken) {
+	if _, err := bookLesson(a, ctx, core.BookTrial, e.kid2, e.kid2.ID, e.tutor.ID, e.math, start); !errors.Is(err, domain.ErrSlotTaken) {
 		t.Errorf("занятое окно: %v", err)
 	}
-	if _, err := a.BookTrial(ctx, e.kid2, e.kid.ID, e.tutor2.ID, e.math, start); !errors.Is(err, domain.ErrNotAllowed) {
+	if _, err := bookLesson(a, ctx, core.BookTrial, e.kid2, e.kid.ID, e.tutor2.ID, e.math, start); !errors.Is(err, domain.ErrNotAllowed) {
 		t.Errorf("чужой ученик: %v", err)
 	}
-	if _, err := a.BookOnce(ctx, e.kid, e.kid.ID, e.tutor.ID, e.math, start.Add(3*time.Hour)); !errors.Is(err, domain.ErrNotEnrolled) {
+	if _, err := bookLesson(a, ctx, core.BookOnce, e.kid, e.kid.ID, e.tutor.ID, e.math, start.Add(3*time.Hour)); !errors.Is(err, domain.ErrNotEnrolled) {
 		t.Errorf("обычный урок без закрепления: %v", err)
 	}
 
 	// --- урок прошёл: вопрос репетитору, отметка, отзыв ---
 	a.Now = func() time.Time { return trial.EndsAt().Add(time.Minute) }
-	must(t, a.PromptMarks(ctx))
+	a.Tick(ctx)
 	if !hasText(e.snd.take("tutor"), "Как прошёл урок") {
 		t.Fatal("репетитора не спросили про урок")
 	}
@@ -259,7 +259,8 @@ func TestFullFlow(t *testing.T) {
 	for recStart.Before(realNow.Add(13 * time.Hour)) {
 		recStart = recStart.Add(7 * 24 * time.Hour)
 	}
-	_, created, err := a.BookRecurring(ctx, e.mom, e.kid.ID, e.tutor.ID, e.math, recStart)
+	bk, err := a.Book(ctx, e.mom, core.BookingRequest{Mode: core.BookRecurring, StudentID: e.kid.ID, TutorID: e.tutor.ID, SubjectID: e.math, Start: recStart})
+	created := bk.Created
 	must(t, err)
 	if created < 3 {
 		t.Fatalf("постоянный слот создал %d уроков", created)
@@ -349,8 +350,8 @@ func TestFullFlow(t *testing.T) {
 	e.snd.take("kid")
 	e.snd.take("tutor")
 	e.snd.take("mom")
-	must(t, a.SendReminders(ctx))
-	must(t, a.SendReminders(ctx))
+	a.Tick(ctx)
+	a.Tick(ctx)
 	if n := len(e.snd.take("tutor")); n < 1 || n > 2 {
 		t.Errorf("репетитору напоминаний: %d", n)
 	}
@@ -360,7 +361,7 @@ func TestFullFlow(t *testing.T) {
 
 	// --- урок не отметили: через сутки считается состоявшимся и списывается ---
 	a.Now = func() time.Time { return l2.EndsAt().Add(25 * time.Hour) }
-	must(t, a.AutoHold(ctx))
+	a.Tick(ctx)
 	if bal, _ := e.s.Balance(ctx, e.kid.ID, e.tutor.ID); bal != 7 {
 		t.Errorf("после автоотметки баланс %d, ожидалось 7", bal)
 	}
@@ -376,7 +377,7 @@ func TestAccessRevokedAfterInactivity(t *testing.T) {
 	a := e.app
 	slots, _, err := a.FreeSlots(ctx, e.kid2, e.tutor.ID, e.kid2.ID, 0)
 	must(t, err)
-	trial, err := a.BookTrial(ctx, e.kid2, e.kid2.ID, e.tutor.ID, e.math, slots[0])
+	trial, err := bookLesson(a, ctx, core.BookTrial, e.kid2, e.kid2.ID, e.tutor.ID, e.math, slots[0])
 	must(t, err)
 	a.Now = func() time.Time { return trial.EndsAt().Add(time.Minute) }
 	_, err = a.MarkLesson(ctx, e.tutor, trial.ID, "held")
@@ -388,8 +389,8 @@ func TestAccessRevokedAfterInactivity(t *testing.T) {
 		t.Fatal("доступ не выдан")
 	}
 	a.Now = func() time.Time { return trial.EndsAt().Add(45 * 24 * time.Hour) }
-	must(t, a.SyncAllAccess(ctx))
-	must(t, a.SyncAllAccess(ctx)) // повторный проход не должен исключать дважды
+	a.DailyTick(ctx)
+	a.DailyTick(ctx) // повторный проход не должен исключать дважды
 	e.snd.take("kid2")
 	if len(e.gate.kicked) != 1 || e.gate.kicked[0] != "kid2" {
 		t.Errorf("ученик без занятий должен быть исключён: %v", e.gate.kicked)
@@ -401,7 +402,7 @@ func TestDislikedTrialGivesNoAccess(t *testing.T) {
 	ctx := context.Background()
 	a := e.app
 	slots, _, _ := a.FreeSlots(ctx, e.kid2, e.tutor2.ID, e.kid2.ID, 0)
-	trial, err := a.BookTrial(ctx, e.kid2, e.kid2.ID, e.tutor2.ID, e.math, slots[0])
+	trial, err := bookLesson(a, ctx, core.BookTrial, e.kid2, e.kid2.ID, e.tutor2.ID, e.math, slots[0])
 	must(t, err)
 	a.Now = func() time.Time { return trial.EndsAt().Add(time.Minute) }
 	_, err = a.MarkLesson(ctx, e.tutor2, trial.ID, "held")
@@ -422,10 +423,17 @@ func TestManagedChildMessagesGoToParent(t *testing.T) {
 	ctx := context.Background()
 	childID, err := e.s.CreateManagedChild(ctx, e.mom.ID, "Маша", 6)
 	must(t, err)
-	e.app.Notify(ctx, childID, msg.Text("привет"))
+	slots, _, err := e.app.FreeSlots(ctx, e.mom, e.tutor.ID, childID, 0)
+	must(t, err)
+	trial, err := bookLesson(e.app, ctx, core.BookTrial, e.mom, childID, e.tutor.ID, e.math, slots[0])
+	must(t, err)
+	e.snd.take("mom")
+	// за полчаса до урока: напоминание «за час» адресовано ученику — у Маши нет мессенджера
+	e.app.Now = func() time.Time { return trial.StartsAt.Add(-30 * time.Minute) }
+	e.app.Tick(ctx)
 	got := e.snd.take("mom")
-	if len(got) != 1 || !strings.Contains(got[0].Text, "Маша") {
-		t.Errorf("сообщение ребёнку без мессенджера должно прийти родителю с именем: %+v", got)
+	if !hasText(got, "👤 Маша") || !hasText(got, "Через час") {
+		t.Errorf("напоминание ребёнку без мессенджера должно прийти родителю с именем: %+v", got)
 	}
 }
 
@@ -450,7 +458,7 @@ func TestConcurrentBookingSameSlot(t *testing.T) {
 		wg.Add(1)
 		go func(st domain.User) {
 			defer wg.Done()
-			_, err := e.app.BookTrial(ctx, st, st.ID, e.tutor.ID, e.math, start)
+			_, err := bookLesson(e.app, ctx, core.BookTrial, st, st.ID, e.tutor.ID, e.math, start)
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
@@ -475,7 +483,7 @@ func TestTwoWorkersNoDuplicates(t *testing.T) {
 	ctx := context.Background()
 	slots, _, err := e.app.FreeSlots(ctx, e.kid, e.tutor.ID, e.kid.ID, 0)
 	must(t, err)
-	trial, err := e.app.BookTrial(ctx, e.kid, e.kid.ID, e.tutor.ID, e.math, slots[0])
+	trial, err := bookLesson(e.app, ctx, core.BookTrial, e.kid, e.kid.ID, e.tutor.ID, e.math, slots[0])
 	must(t, err)
 	e.snd.take("tutor")
 	e.snd.take("mom")
@@ -507,7 +515,7 @@ func TestTwoWorkersNoDuplicates(t *testing.T) {
 	must(t, err)
 	for i := 0; i < 3; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); must(t, w1.SyncAllAccess(ctx)) }()
+		go func() { defer wg.Done(); w1.DailyTick(ctx) }()
 	}
 	wg.Wait()
 	e.snd.take("kid")
@@ -517,6 +525,7 @@ func TestTwoWorkersNoDuplicates(t *testing.T) {
 }
 
 // Уведомление уходит в мессенджер, где пользователь был последним.
+// Уведомление уходит в мессенджер, где пользователь был последним.
 func TestNotifyPrefersLastSeenMessenger(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
@@ -525,11 +534,21 @@ func TestNotifyPrefersLastSeenMessenger(t *testing.T) {
 	// привязываем VK-аккаунт к тому же ученику и «заходим» из VK позже
 	_, err = e.s.DebugExec(ctx, `UPDATE identities SET user_id=$1, last_seen_at=now()+interval '1 minute' WHERE provider='vk'`, e.kid.ID)
 	must(t, err)
-	e.app.Notify(ctx, e.kid.ID, msg.Text("куда?"))
+	// родитель записывает ребёнка — ученик получает уведомление о записи
+	slots, _, err := e.app.FreeSlots(ctx, e.mom, e.tutor.ID, e.kid.ID, 0)
+	must(t, err)
+	_, err = bookLesson(e.app, ctx, core.BookTrial, e.mom, e.kid.ID, e.tutor.ID, e.math, slots[0])
+	must(t, err)
 	if got := e.snd.take("kid"); len(got) != 0 {
 		t.Error("сообщение не должно уйти в старый мессенджер")
 	}
 	if n, _ := e.s.PendingOutbox(ctx); n != 1 {
-		t.Errorf("сообщение должно ждать VK-адаптер, в очереди %d", n)
+		t.Errorf("сообщение ученику должно ждать VK-адаптер, в очереди %d", n)
 	}
+}
+
+// bookLesson — пробный или разовый урок через единый Book.
+func bookLesson(a *core.App, ctx context.Context, mode core.BookingMode, actor domain.User, studentID, tutorID int64, subjectID int, start time.Time) (domain.Lesson, error) {
+	b, err := a.Book(ctx, actor, core.BookingRequest{Mode: mode, StudentID: studentID, TutorID: tutorID, SubjectID: subjectID, Start: start})
+	return b.Lesson, err
 }

@@ -114,24 +114,23 @@ func (e *Engine) studentAction(r *req, act actions.Action) (bool, error) {
 
 	case actions.Book:
 		start := a.StartTime()
-		var err error
-		var text string
-		switch a.Mode {
-		case actions.ModeTrial:
-			_, err = e.App.BookTrial(ctx, u, a.StudentID, a.TutorID, a.SubjectID, start)
-			text = "✅ Записали на пробный урок: " + domain.FormatDateTime(start, r.loc()) + "\nНапомним утром в день урока и за час до начала."
-		case actions.ModeOnce:
-			_, err = e.App.BookOnce(ctx, u, a.StudentID, a.TutorID, a.SubjectID, start)
-			text = "✅ Записали на урок: " + domain.FormatDateTime(start, r.loc())
-		case actions.ModeRecurring:
-			var n int
-			_, n, err = e.App.BookRecurring(ctx, u, a.StudentID, a.TutorID, a.SubjectID, start)
-			lt := start.In(r.loc())
-			text = fmt.Sprintf("✅ Постоянное время: каждую неделю — %s, %s.\nСоздано уроков на ближайшие недели: %d",
-				domain.WeekdayFull(lt.Weekday()), domain.FormatTime(start, r.loc()), n)
-		}
+		mode := map[actions.BookMode]core.BookingMode{
+			actions.ModeTrial: core.BookTrial, actions.ModeOnce: core.BookOnce, actions.ModeRecurring: core.BookRecurring,
+		}[a.Mode]
+		b, err := e.App.Book(ctx, u, core.BookingRequest{Mode: mode, StudentID: a.StudentID, TutorID: a.TutorID, SubjectID: a.SubjectID, Start: start})
 		if err != nil {
 			return true, err
+		}
+		var text string
+		switch mode {
+		case core.BookTrial:
+			text = "✅ Записали на пробный урок: " + domain.FormatDateTime(start, r.loc()) + "\nНапомним утром в день урока и за час до начала."
+		case core.BookOnce:
+			text = "✅ Записали на урок: " + domain.FormatDateTime(start, r.loc())
+		case core.BookRecurring:
+			lt := start.In(r.loc())
+			text = fmt.Sprintf("✅ Постоянное время: каждую неделю — %s, %s.\nСоздано уроков на ближайшие недели: %d",
+				domain.WeekdayFull(lt.Weekday()), domain.FormatTime(start, r.loc()), b.Created)
 		}
 		r.screen(text, msg.Row(msg.Btn("📅 Мои уроки", actions.StudentLessons{StudentID: a.StudentID}), msg.Btn("🏠 Меню", actions.Home{})))
 		return true, nil
