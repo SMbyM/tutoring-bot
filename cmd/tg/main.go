@@ -51,6 +51,7 @@ func run() error {
 		return err
 	}
 
+	logProxy()
 	app := core.New(s, cfg.CoreOptions())
 	eng := ui.NewEngine(app, cfg.AdminTelegramIDs, cfg.MiniAppURL, cfg.PolicyURL)
 	tg, err := telegram.New(ctx, cfg.BotToken, cfg.TelegramAPIURL, eng, cfg.ChannelID)
@@ -74,4 +75,18 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// logProxy пишет в лог, через какой прокси бот пойдёт в Telegram (без логина и пароля).
+func logProxy() {
+	req, _ := http.NewRequest(http.MethodGet, "https://api.telegram.org", nil)
+	p, err := http.ProxyFromEnvironment(req)
+	switch {
+	case err != nil:
+		slog.Warn("прокси указан с ошибкой", "err", err)
+	case p == nil:
+		slog.Info("Telegram: прямое подключение, прокси не задан")
+	default:
+		slog.Info("Telegram: через прокси", "proxy", p.Scheme+"://"+p.Host)
+	}
 }
