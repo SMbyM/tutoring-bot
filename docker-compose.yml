@@ -31,6 +31,7 @@ services:
   # но второй не навредит: все задачи идемпотентны.
   worker:
     image: tutoring-bot
+    pull_policy: never # образ собирается сервисом tg, из реестра его не тянем
     entrypoint: ["/worker"]
     restart: unless-stopped
     env_file: .env
