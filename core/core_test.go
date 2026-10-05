@@ -165,7 +165,7 @@ func TestFullFlow(t *testing.T) {
 	realNow := time.Now()
 
 	// --- пробный урок ---
-	slots, _, err := a.FreeSlots(ctx, e.tutor.ID, e.kid.ID, 0)
+	slots, _, err := a.FreeSlots(ctx, e.kid, e.tutor.ID, e.kid.ID, 0)
 	must(t, err)
 	if len(slots) == 0 {
 		t.Fatal("нет свободных окон")
@@ -206,7 +206,8 @@ func TestFullFlow(t *testing.T) {
 	if err := a.Enroll(ctx, e.kid, e.kid.ID, e.tutor.ID, e.math); !errors.Is(err, domain.ErrNotEnrolled) {
 		t.Errorf("закрепление без отзыва: %v", err)
 	}
-	fbID, _, err := a.LeaveFeedback(ctx, e.kid, trial.ID, true)
+	fb, err := a.LeaveFeedback(ctx, e.kid, trial.ID, true)
+	fbID := fb.ID
 	must(t, err)
 	if !hasText(e.snd.take("mom"), "понравился") {
 		t.Error("родитель должен видеть отзыв")
@@ -251,7 +252,7 @@ func TestFullFlow(t *testing.T) {
 		t.Error("баланс не должен зависеть от новой цены")
 	}
 
-	slots, _, err = a.FreeSlots(ctx, e.tutor.ID, e.kid.ID, 0)
+	slots, _, err = a.FreeSlots(ctx, e.kid, e.tutor.ID, e.kid.ID, 0)
 	must(t, err)
 	recStart := slots[len(slots)-1].Add(-7 * 24 * time.Hour) // повтор в пределах горизонта
 	for recStart.Before(realNow.Add(13 * time.Hour)) {
@@ -269,7 +270,7 @@ func TestFullFlow(t *testing.T) {
 	far := up[len(up)-1]
 
 	// --- перенос учеником требует подтверждения родителя ---
-	newSlots, _, err := a.FreeSlots(ctx, e.tutor.ID, e.kid.ID, far.ID)
+	newSlots, _, err := a.FreeSlots(ctx, e.kid, e.tutor.ID, e.kid.ID, far.ID)
 	must(t, err)
 	var target time.Time
 	for _, s := range newSlots {
@@ -370,14 +371,14 @@ func TestAccessRevokedAfterInactivity(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
 	a := e.app
-	slots, _, err := a.FreeSlots(ctx, e.tutor.ID, e.kid2.ID, 0)
+	slots, _, err := a.FreeSlots(ctx, e.kid2, e.tutor.ID, e.kid2.ID, 0)
 	must(t, err)
 	trial, err := a.BookTrial(ctx, e.kid2, e.kid2.ID, e.tutor.ID, e.math, slots[0])
 	must(t, err)
 	a.Now = func() time.Time { return trial.EndsAt().Add(time.Minute) }
 	_, err = a.MarkLesson(ctx, e.tutor, trial.ID, "held")
 	must(t, err)
-	_, _, err = a.LeaveFeedback(ctx, e.kid2, trial.ID, true)
+	_, err = a.LeaveFeedback(ctx, e.kid2, trial.ID, true)
 	must(t, err)
 	e.snd.take("kid2")
 	if len(e.gate.invites) != 1 {
@@ -396,13 +397,13 @@ func TestDislikedTrialGivesNoAccess(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
 	a := e.app
-	slots, _, _ := a.FreeSlots(ctx, e.tutor2.ID, e.kid2.ID, 0)
+	slots, _, _ := a.FreeSlots(ctx, e.kid2, e.tutor2.ID, e.kid2.ID, 0)
 	trial, err := a.BookTrial(ctx, e.kid2, e.kid2.ID, e.tutor2.ID, e.math, slots[0])
 	must(t, err)
 	a.Now = func() time.Time { return trial.EndsAt().Add(time.Minute) }
 	_, err = a.MarkLesson(ctx, e.tutor2, trial.ID, "held")
 	must(t, err)
-	_, _, err = a.LeaveFeedback(ctx, e.kid2, trial.ID, false)
+	_, err = a.LeaveFeedback(ctx, e.kid2, trial.ID, false)
 	must(t, err)
 	e.snd.take("kid2")
 	if len(e.gate.invites) != 0 {
@@ -429,7 +430,7 @@ func TestManagedChildMessagesGoToParent(t *testing.T) {
 func TestConcurrentBookingSameSlot(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
-	slots, _, err := e.app.FreeSlots(ctx, e.tutor.ID, e.kid.ID, 0)
+	slots, _, err := e.app.FreeSlots(ctx, e.kid, e.tutor.ID, e.kid.ID, 0)
 	must(t, err)
 	start := slots[3]
 	const n = 10
@@ -469,7 +470,7 @@ func TestConcurrentBookingSameSlot(t *testing.T) {
 func TestTwoWorkersNoDuplicates(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
-	slots, _, err := e.app.FreeSlots(ctx, e.tutor.ID, e.kid.ID, 0)
+	slots, _, err := e.app.FreeSlots(ctx, e.kid, e.tutor.ID, e.kid.ID, 0)
 	must(t, err)
 	trial, err := e.app.BookTrial(ctx, e.kid, e.kid.ID, e.tutor.ID, e.math, slots[0])
 	must(t, err)
@@ -499,7 +500,7 @@ func TestTwoWorkersNoDuplicates(t *testing.T) {
 	e.app.Now = later
 	_, err = e.app.MarkLesson(ctx, e.tutor, trial.ID, "held")
 	must(t, err)
-	_, _, err = e.app.LeaveFeedback(ctx, e.kid, trial.ID, true)
+	_, err = e.app.LeaveFeedback(ctx, e.kid, trial.ID, true)
 	must(t, err)
 	for i := 0; i < 3; i++ {
 		wg.Add(1)

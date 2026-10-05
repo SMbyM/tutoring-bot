@@ -4,8 +4,6 @@ package ui
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"log/slog"
 	"strings"
@@ -94,6 +92,11 @@ func (r *req) fail(err error) {
 			return
 		}
 	}
+	var ie domain.InputError
+	if errors.As(err, &ie) {
+		r.send("⚠️ " + ie.Error())
+		return
+	}
 	var ue userError
 	if errors.As(err, &ue) {
 		r.send("⚠️ " + ue.Error())
@@ -108,12 +111,6 @@ type userError struct{ error }
 
 func uerr(err error) error { return userError{err} }
 
-func newCode() string {
-	b := make([]byte, 6)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
 // Handle обрабатывает одно входящее событие и возвращает ответы для этого же чата.
 func (e *Engine) Handle(ctx context.Context, in Input) []msg.Message {
 	r := &req{ctx: ctx, e: e, in: in, callback: in.Action != ""}
@@ -126,27 +123,10 @@ func (e *Engine) Handle(ctx context.Context, in Input) []msg.Message {
 func (e *Engine) handle(r *req) error {
 	ctx, in := r.ctx, r.in
 	id := store.Identity{Provider: in.Provider, ExternalID: in.ExternalID, ChatID: in.ChatID, Username: in.Username}
-	u, ok, err := e.S.UserByIdentity(ctx, in.Provider, in.ExternalID)
+	isAdmin := in.Provider == "tg" && e.AdminIDs[in.ExternalID]
+	u, err := e.App.Identify(ctx, id, isAdmin)
 	if err != nil {
 		return err
-	}
-	isAdmin := in.Provider == "tg" && e.AdminIDs[in.ExternalID]
-	if !ok {
-		role := domain.RoleNone
-		if isAdmin {
-			role = domain.RoleAdmin
-		}
-		if u, err = e.S.CreateUser(ctx, id, "", role); err != nil {
-			return err
-		}
-	} else {
-		_ = e.S.UpdateIdentity(ctx, id)
-		if isAdmin && u.Role != domain.RoleAdmin {
-			if err := e.S.SetRole(ctx, u.ID, domain.RoleAdmin); err != nil {
-				return err
-			}
-			u.Role = domain.RoleAdmin
-		}
 	}
 	r.u = u
 	r.role = u.EffectiveRole(e.debug())
@@ -186,69 +166,19 @@ func (e *Engine) handle(r *req) error {
 }
 
 // useInvite — /start p_<код> (ученик позвал родителя), c_<код> (родитель позвал ребёнка), t_<код> (админ позвал репетитора).
-func (e *Engine) useInvite(r *req, arg string) error {
-	ctx, u := r.ctx, r.u
-	prefix, code, ok := strings.Cut(arg, "_")
-	if !ok {
-		return nil
+func (e *Engine) useInvite(r *req, payload string) error {
+	text, err := e.App.AcceptInvite(r.ctx, r.u, payload)
+	if err != nil {
+		return err
 	}
-	return e.S.Tx(ctx, func(s *store.Store) error {
-		inv, err := s.UseInvite(ctx, code)
-		if err != nil {
-			return err
-		}
-		switch {
-		case prefix == "t" && inv.Kind == "tutor":
-			if u.Role != domain.RoleNone && u.Role != domain.RoleTutor && u.Role != domain.RoleAdmin {
-				return uerr(errors.New("вы уже зарегистрированы с другой ролью — напишите администратору"))
-			}
-			if u.Role == domain.RoleNone {
-				if err := s.SetRole(ctx, u.ID, domain.RoleTutor); err != nil {
-					return err
-				}
-				r.u.Role = domain.RoleTutor
-			}
-			if err := s.EnsureTutor(ctx, u.ID); err != nil {
-				return err
-			}
-			r.send("👋 Вы приглашены в школу как репетитор.")
-		case prefix == "p" && inv.Kind == "parent_link":
-			if u.Role != domain.RoleNone && u.Role != domain.RoleParent {
-				return uerr(errors.New("эта ссылка для родителя, а вы зарегистрированы с другой ролью"))
-			}
-			if u.Role == domain.RoleNone {
-				if err := s.SetRole(ctx, u.ID, domain.RoleParent); err != nil {
-					return err
-				}
-				r.u.Role = domain.RoleParent
-			}
-			if err := s.Link(ctx, u.ID, inv.CreatedBy); err != nil {
-				return err
-			}
-			child, _ := s.UserByID(ctx, inv.CreatedBy)
-			r.send("🔗 Вы привязаны как родитель: " + child.Name)
-			e.App.Notify(ctx, inv.CreatedBy, msg.Text("🔗 Родитель привязан к вашему аккаунту."))
-		case prefix == "c" && inv.Kind == "child_link":
-			if u.Role != domain.RoleNone && u.Role != domain.RoleStudent {
-				return uerr(errors.New("эта ссылка для ученика, а вы зарегистрированы с другой ролью"))
-			}
-			if u.Role == domain.RoleNone {
-				if err := s.SetRole(ctx, u.ID, domain.RoleStudent); err != nil {
-					return err
-				}
-				r.u.Role = domain.RoleStudent
-			}
-			if err := s.Link(ctx, inv.CreatedBy, u.ID); err != nil {
-				return err
-			}
-			r.send("🔗 Ваш аккаунт привязан к родителю.")
-			e.App.Notify(ctx, inv.CreatedBy, msg.Text("🔗 Ребёнок привязан к вашему аккаунту."))
-		default:
-			return domain.ErrInviteInvalid
-		}
-		r.role = r.u.EffectiveRole(e.debug())
-		return nil
-	})
+	r.send(text)
+	// роль могла измениться — перечитываем пользователя
+	u, _, err := e.App.FindUser(r.ctx, r.in.Provider, r.in.ExternalID)
+	if err != nil {
+		return err
+	}
+	r.u, r.role = u, u.EffectiveRole(e.debug())
+	return nil
 }
 
 // home — главное меню или следующий шаг регистрации.
@@ -276,7 +206,7 @@ func (e *Engine) home(r *req) error {
 		r.screen("В каком вы классе?", gradeRows("grade")...)
 		return nil
 	}
-	st, err := e.S.Settings(r.ctx, u.ID)
+	st, err := e.App.Settings(r.ctx, u)
 	if err != nil {
 		return err
 	}
@@ -327,7 +257,7 @@ func (e *Engine) mainMenu(r *req) error {
 			msg.Row(msg.Btn("👨‍👩‍👧 Привязать родителя", "pinv"), msg.Btn("⚙️ Настройки", "st")),
 		}
 	case domain.RoleParent:
-		kids, err := e.S.ChildrenOf(r.ctx, r.u.ID)
+		kids, err := e.App.Children(r.ctx, r.u)
 		if err != nil {
 			return err
 		}
@@ -371,11 +301,10 @@ func (e *Engine) onText(r *req, state string, data map[string]string, text strin
 	clear := func() error { return e.S.ClearState(ctx, u.ID) }
 	switch state {
 	case "name":
-		name := trim(text, 60)
-		if err := e.S.SetName(ctx, u.ID, name); err != nil {
+		if err := e.App.SetName(ctx, u, text); err != nil {
 			return err
 		}
-		r.u.Name = name
+		r.u.Name = strings.TrimSpace(text)
 		if err := clear(); err != nil {
 			return err
 		}
@@ -389,15 +318,13 @@ func (e *Engine) onText(r *req, state string, data map[string]string, text strin
 		if err := clear(); err != nil {
 			return err
 		}
-		fbID := atoi64(data["fb"])
-		if err := e.App.SetFeedbackComment(ctx, u, fbID, trim(text, 1000)); err != nil {
+		f, err := e.App.SetFeedbackComment(ctx, u, atoi64(data["fb"]), text)
+		if err != nil {
 			return err
 		}
 		rows := [][]msg.Button{msg.Row(msg.Btn("🏠 В меню", "home"))}
-		if f, err := e.S.Feedback(ctx, fbID); err == nil && f.Liked {
-			if l, err := e.S.Lesson(ctx, f.LessonID); err == nil {
-				rows = append([][]msg.Button{msg.Row(msg.Btn("🤝 Заниматься у этого репетитора", "enr", l.TutorID, l.SubjectID, l.StudentID))}, rows...)
-			}
+		if f.Liked {
+			rows = append([][]msg.Button{msg.Row(msg.Btn("🤝 Заниматься у этого репетитора", "enr", f.TutorID, f.SubjectID, f.StudentID))}, rows...)
 		}
 		r.send("Спасибо, комментарий передан.", rows...)
 		return nil
@@ -426,30 +353,27 @@ func (e *Engine) action(r *req, p msg.Parsed) error {
 		_ = e.S.ClearState(ctx, u.ID)
 		return e.home(r)
 	case "consent":
-		if err := e.S.SetConsent(ctx, u.ID); err != nil {
+		if err := e.App.AcceptConsent(ctx, u); err != nil {
 			return err
 		}
 		r.u.Consent = true
 		return e.home(r)
 	case "role":
 		role := domain.Role(p.Str(0))
-		if u.Role != domain.RoleNone || (role != domain.RoleStudent && role != domain.RoleParent) {
+		if err := e.App.ChooseRole(ctx, u, role); err != nil {
 			return e.home(r)
-		}
-		if err := e.S.SetRole(ctx, u.ID, role); err != nil {
-			return err
 		}
 		r.u.Role, r.role = role, role
 		return e.home(r)
 	case "nameok":
-		if err := e.S.SetName(ctx, u.ID, trim(r.in.FirstName, 60)); err != nil {
+		if err := e.App.SetName(ctx, u, trim(r.in.FirstName, 60)); err != nil {
 			return err
 		}
 		r.u.Name = r.in.FirstName
 		_ = e.S.ClearState(ctx, u.ID)
 		return e.home(r)
 	case "grade":
-		if err := e.S.SetGrade(ctx, u.ID, int(p.Int(0))); err != nil {
+		if err := e.App.SetGrade(ctx, u, int(p.Int(0))); err != nil {
 			return err
 		}
 		r.u.Grade = int(p.Int(0))

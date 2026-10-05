@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/SMbyM/tutoring-bot/core"
 	"github.com/SMbyM/tutoring-bot/domain"
@@ -18,6 +17,7 @@ func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
 	default:
 		return false, nil
 	}
+	// права проверяет core; здесь — только чтобы не задавать вопросы админки не-админу
 	if r.role != domain.RoleAdmin {
 		return true, domain.ErrNotAllowed
 	}
@@ -25,7 +25,7 @@ func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
 	back := msg.Row(msg.Btn("⬅️ Назад", "home"))
 	switch p.Name {
 	case "at":
-		ts, err := e.S.AllTutors(ctx)
+		ts, err := e.App.Tutors(ctx, u)
 		if err != nil {
 			return true, err
 		}
@@ -52,17 +52,17 @@ func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
 		return true, nil
 
 	case "atpr":
-		if err := e.S.SetTutorPrice(ctx, p.Int(0), nil); err != nil {
+		if err := e.App.SetTutorPrice(ctx, u, p.Int(0), nil); err != nil {
 			return true, err
 		}
 		return true, e.adminTutorCard(r, p.Int(0))
 
 	case "ainv":
-		code := newCode()
-		if err := e.S.CreateInvite(ctx, storeInvite(code, "tutor", u.ID), 7*24*time.Hour); err != nil {
+		payload, err := e.App.CreateInvite(ctx, u, core.InviteTutor)
+		if err != nil {
 			return true, err
 		}
-		r.screen("Отправьте ссылку репетитору. Одноразовая, действует 7 дней:\n\n"+e.BotLink("t_"+code), back)
+		r.screen("Отправьте ссылку репетитору. Одноразовая, действует 7 дней:\n\n"+e.BotLink(payload), back)
 		return true, nil
 
 	case "apr":
@@ -76,7 +76,7 @@ func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
 		return true, nil
 
 	case "aptg":
-		if err := e.S.ToggleProduct(ctx, int(p.Int(0))); err != nil {
+		if err := e.App.ToggleProduct(ctx, u, int(p.Int(0))); err != nil {
 			return true, err
 		}
 		return true, e.adminPrices(r)
@@ -89,7 +89,7 @@ func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
 		return true, nil
 
 	case "afb":
-		fs, err := e.S.RecentFeedback(ctx, 10)
+		fs, err := e.App.RecentFeedback(ctx, u, 10)
 		if err != nil {
 			return true, err
 		}
@@ -129,7 +129,7 @@ func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
 		return true, nil
 
 	case "alc":
-		ls, err := e.S.LateCancels(ctx, 15)
+		ls, err := e.App.LateCancels(ctx, u, 15)
 		if err != nil {
 			return true, err
 		}
@@ -149,7 +149,7 @@ func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
 		return true, nil
 
 	case "asub":
-		subs, err := e.S.Subjects(ctx)
+		subs, err := e.App.Subjects(ctx)
 		if err != nil {
 			return true, err
 		}
@@ -171,14 +171,11 @@ func (e *Engine) adminAction(r *req, p msg.Parsed) (bool, error) {
 }
 
 func (e *Engine) adminTutorCard(r *req, id int64) error {
-	t, err := e.S.Tutor(r.ctx, id)
+	c, err := e.App.AdminTutor(r.ctx, r.u, id)
 	if err != nil {
 		return err
 	}
-	base, err := e.S.BasePrice(r.ctx)
-	if err != nil {
-		return err
-	}
+	t, base := c.Tutor, c.BasePrice
 	subs := make([]string, len(t.Subjects))
 	for i, s := range t.Subjects {
 		subs[i] = s.Name
@@ -187,10 +184,8 @@ func (e *Engine) adminTutorCard(r *req, id int64) error {
 	if t.PriceOverride != nil {
 		price = domain.FormatRub(*t.PriceOverride) + " (индивидуальная)"
 	}
-	ws, _ := e.S.Windows(r.ctx, id)
-	sts, _ := e.S.TutorStudents(r.ctx, id)
 	text := fmt.Sprintf("👩‍🏫 %s\nПредметы: %s\nУрок: %d мин, %s\nОкон в неделю: %d\nУчеников: %d",
-		t.Name, strings.Join(subs, ", "), t.LessonMinutes, price, len(ws), len(sts))
+		t.Name, strings.Join(subs, ", "), t.LessonMinutes, price, c.Windows, c.Students)
 	rows := [][]msg.Button{msg.Row(msg.Btn("💰 Индивидуальная цена", "atp", id))}
 	if t.PriceOverride != nil {
 		rows = append(rows, msg.Row(msg.Btn("↩️ Вернуть общую цену", "atpr", id)))
@@ -201,14 +196,11 @@ func (e *Engine) adminTutorCard(r *req, id int64) error {
 }
 
 func (e *Engine) adminPrices(r *req) error {
-	base, err := e.S.BasePrice(r.ctx)
+	pl, err := e.App.Prices(r.ctx, r.u)
 	if err != nil {
 		return err
 	}
-	ps, err := e.S.Products(r.ctx, false)
-	if err != nil {
-		return err
-	}
+	base, ps := pl.BasePrice, pl.Products
 	var b strings.Builder
 	fmt.Fprintf(&b, "💰 Общая цена урока: %s\n\nТарифы (по общей цене):", domain.FormatRub(base))
 	rows := [][]msg.Button{msg.Row(msg.Btn("✏️ Изменить общую цену", "abp"))}
@@ -238,9 +230,6 @@ func (e *Engine) adminText(r *req, state string, data map[string]string, text st
 	default:
 		return false, nil
 	}
-	if r.role != domain.RoleAdmin {
-		return true, domain.ErrNotAllowed
-	}
 	ctx, u := r.ctx, r.u
 	switch state {
 	case "aprice":
@@ -249,7 +238,7 @@ func (e *Engine) adminText(r *req, state string, data map[string]string, text st
 			return true, uerr(err)
 		}
 		id := atoi64(data["tutor"])
-		if err := e.S.SetTutorPrice(ctx, id, &v); err != nil {
+		if err := e.App.SetTutorPrice(ctx, u, id, &v); err != nil {
 			return true, err
 		}
 		_ = e.S.ClearState(ctx, u.ID)
@@ -259,7 +248,7 @@ func (e *Engine) adminText(r *req, state string, data map[string]string, text st
 		if err != nil {
 			return true, uerr(err)
 		}
-		if err := e.S.SetBasePrice(ctx, v); err != nil {
+		if err := e.App.SetBasePrice(ctx, u, v); err != nil {
 			return true, err
 		}
 		_ = e.S.ClearState(ctx, u.ID)
@@ -269,13 +258,13 @@ func (e *Engine) adminText(r *req, state string, data map[string]string, text st
 		if err != nil {
 			return true, uerr(err)
 		}
-		if err := e.S.AddProduct(ctx, p); err != nil {
+		if err := e.App.AddProduct(ctx, u, p); err != nil {
 			return true, err
 		}
 		_ = e.S.ClearState(ctx, u.ID)
 		return true, e.adminPrices(r)
 	case "asubject":
-		if err := e.S.AddSubject(ctx, trim(text, 50)); err != nil {
+		if err := e.App.AddSubject(ctx, u, text); err != nil {
 			return true, err
 		}
 		_ = e.S.ClearState(ctx, u.ID)
@@ -300,17 +289,6 @@ func parseProduct(text string) (domain.Product, error) {
 		}
 		nums[i] = n
 	}
-	p := domain.Product{Name: name, Lessons: nums[0], DiscountPct: nums[1], ValidDays: nums[2]}
-	if name == "" || p.Lessons < 1 || p.Lessons > 200 || p.DiscountPct > 90 {
-		return p, errors.New("проверьте название, число уроков (1–200) и скидку (0–90%)")
-	}
-	switch {
-	case p.ValidDays > 0:
-		p.Kind = domain.ProductSubscription
-	case p.Lessons == 1:
-		p.Kind = domain.ProductSingle
-	default:
-		p.Kind = domain.ProductPack
-	}
-	return p, nil
+	// допустимость значений и вид тарифа определяет core.AddProduct
+	return domain.Product{Name: name, Lessons: nums[0], DiscountPct: nums[1], ValidDays: nums[2]}, nil
 }

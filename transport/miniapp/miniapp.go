@@ -3,7 +3,6 @@
 package miniapp
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"embed"
@@ -20,17 +19,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SMbyM/tutoring-bot/core"
 	"github.com/SMbyM/tutoring-bot/domain"
-	"github.com/SMbyM/tutoring-bot/store"
 )
 
 //go:embed static
 var staticFS embed.FS
 
+// Server — тонкий HTTP-адаптер поверх core: права и проверки данных делает core.
 type Server struct {
-	S        *store.Store
+	App      *core.App
 	BotToken string
-	Debug    bool
 	Log      *slog.Logger
 }
 
@@ -46,8 +45,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/exceptions/{id}", s.auth(s.deleteException))
 	return mux
 }
-
-type ctxKey struct{}
 
 // ValidateInitData проверяет подпись Telegram WebApp initData и возвращает id пользователя Telegram.
 // https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
@@ -91,8 +88,9 @@ func ValidateInitData(initData, botToken string, now time.Time, maxAge time.Dura
 	return user.ID, nil
 }
 
-// auth пускает только репетиторов (в debug — и тех, кто переключился на роль репетитора).
-func (s *Server) auth(next func(http.ResponseWriter, *http.Request, store.Tutor)) http.HandlerFunc {
+// auth определяет пользователя по подписанному initData. Кто имеет право редактировать
+// расписание, решает core (сейчас — только репетитор).
+func (s *Server) auth(next func(http.ResponseWriter, *http.Request, domain.User)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		initData := strings.TrimPrefix(r.Header.Get("Authorization"), "tma ")
 		tgID, err := ValidateInitData(initData, s.BotToken, time.Now(), 24*time.Hour)
@@ -100,25 +98,34 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, store.Tutor)
 			httpErr(w, http.StatusUnauthorized, "Откройте редактор из бота: "+err.Error())
 			return
 		}
-		u, ok, err := s.S.UserByIdentity(r.Context(), "tg", strconv.FormatInt(tgID, 10))
-		if err != nil || !ok {
+		u, ok, err := s.App.FindUser(r.Context(), "tg", strconv.FormatInt(tgID, 10))
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		if !ok {
 			httpErr(w, http.StatusForbidden, "Сначала зарегистрируйтесь в боте")
 			return
 		}
-		if u.EffectiveRole(s.Debug) != domain.RoleTutor {
-			httpErr(w, http.StatusForbidden, "Редактор расписания доступен только репетиторам")
-			return
+		next(w, r, u)
+	}
+}
+
+// fail переводит ошибки core в HTTP-ответы.
+func (s *Server) fail(w http.ResponseWriter, err error) {
+	var ie domain.InputError
+	switch {
+	case errors.Is(err, domain.ErrNotAllowed):
+		httpErr(w, http.StatusForbidden, "Редактор расписания доступен только репетиторам")
+	case errors.As(err, &ie):
+		httpErr(w, http.StatusBadRequest, ie.Error())
+	case errors.Is(err, domain.ErrNotFound):
+		httpErr(w, http.StatusNotFound, "не найдено")
+	default:
+		if s.Log != nil {
+			s.Log.Error("miniapp", "err", err)
 		}
-		if err := s.S.EnsureTutor(r.Context(), u.ID); err != nil {
-			httpErr(w, http.StatusInternalServerError, "ошибка БД")
-			return
-		}
-		t, err := s.S.Tutor(r.Context(), u.ID)
-		if err != nil {
-			httpErr(w, http.StatusInternalServerError, "ошибка БД")
-			return
-		}
-		next(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, u.ID)), t)
+		httpErr(w, http.StatusInternalServerError, "внутренняя ошибка")
 	}
 }
 
@@ -148,15 +155,10 @@ func parseHM(s string) (int, error) {
 	return t.Hour()*60 + t.Minute(), nil
 }
 
-func (s *Server) getSchedule(w http.ResponseWriter, r *http.Request, t store.Tutor) {
-	ws, err := s.S.Windows(r.Context(), t.ID)
+func (s *Server) getSchedule(w http.ResponseWriter, r *http.Request, u domain.User) {
+	sc, err := s.App.MySchedule(r.Context(), u)
 	if err != nil {
-		httpErr(w, 500, "ошибка БД")
-		return
-	}
-	ex, err := s.S.Exceptions(r.Context(), t.ID, t.Location())
-	if err != nil {
-		httpErr(w, 500, "ошибка БД")
+		s.fail(w, err)
 		return
 	}
 	out := struct {
@@ -164,17 +166,17 @@ func (s *Server) getSchedule(w http.ResponseWriter, r *http.Request, t store.Tut
 		LessonMinutes int            `json:"lesson_minutes"`
 		Windows       []windowDTO    `json:"windows"`
 		Exceptions    []exceptionDTO `json:"exceptions"`
-	}{Name: t.Name, LessonMinutes: t.LessonMinutes, Windows: []windowDTO{}, Exceptions: []exceptionDTO{}}
-	for _, w := range ws {
+	}{Name: sc.Tutor.Name, LessonMinutes: sc.Tutor.LessonMinutes, Windows: []windowDTO{}, Exceptions: []exceptionDTO{}}
+	for _, w := range sc.Windows {
 		out.Windows = append(out.Windows, windowDTO{int(w.Weekday), hm(w.StartMin), hm(w.EndMin)})
 	}
-	for _, e := range ex {
+	for _, e := range sc.Exceptions {
 		out.Exceptions = append(out.Exceptions, exceptionDTO{e.ID, e.From.Format("2006-01-02"), e.To.Format("2006-01-02"), e.Note})
 	}
 	writeJSON(w, out)
 }
 
-func (s *Server) putWindows(w http.ResponseWriter, r *http.Request, t store.Tutor) {
+func (s *Server) putWindows(w http.ResponseWriter, r *http.Request, u domain.User) {
 	var in struct {
 		Windows []windowDTO `json:"windows"`
 	}
@@ -192,63 +194,59 @@ func (s *Server) putWindows(w http.ResponseWriter, r *http.Request, t store.Tuto
 		}
 		ws = append(ws, domain.Window{Weekday: time.Weekday(d.Weekday), StartMin: st, EndMin: en})
 	}
-	if err := s.S.ReplaceWindows(r.Context(), t.ID, ws); err != nil {
-		httpErr(w, 400, err.Error())
+	if err := s.App.SetWindows(r.Context(), u, ws); err != nil {
+		s.fail(w, err)
 		return
 	}
-	s.getSchedule(w, r, t)
+	s.getSchedule(w, r, u)
 }
 
-func (s *Server) putDuration(w http.ResponseWriter, r *http.Request, t store.Tutor) {
+func (s *Server) putDuration(w http.ResponseWriter, r *http.Request, u domain.User) {
 	var in struct {
 		Minutes int `json:"minutes"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Minutes < 15 || in.Minutes > 240 {
-		httpErr(w, 400, "длительность от 15 до 240 минут")
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httpErr(w, 400, "неверный запрос")
 		return
 	}
-	if err := s.S.SetTutorDuration(r.Context(), t.ID, in.Minutes); err != nil {
-		httpErr(w, 500, "ошибка БД")
+	if err := s.App.SetLessonMinutes(r.Context(), u, in.Minutes); err != nil {
+		s.fail(w, err)
 		return
 	}
-	t.LessonMinutes = in.Minutes
-	s.getSchedule(w, r, t)
+	s.getSchedule(w, r, u)
 }
 
-func (s *Server) addException(w http.ResponseWriter, r *http.Request, t store.Tutor) {
+func (s *Server) addException(w http.ResponseWriter, r *http.Request, u domain.User) {
 	var in exceptionDTO
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		httpErr(w, 400, "неверный запрос")
 		return
 	}
-	from, err1 := time.ParseInLocation("2006-01-02", in.From, t.Location())
-	to, err2 := time.ParseInLocation("2006-01-02", in.To, t.Location())
-	if errors.Join(err1, err2) != nil || to.Before(from) {
+	loc := u.Location()
+	from, err1 := time.ParseInLocation("2006-01-02", in.From, loc)
+	to, err2 := time.ParseInLocation("2006-01-02", in.To, loc)
+	if errors.Join(err1, err2) != nil {
 		httpErr(w, 400, "проверьте даты")
 		return
 	}
-	note := in.Note
-	if len([]rune(note)) > 100 {
-		note = string([]rune(note)[:100])
-	}
-	if err := s.S.AddException(r.Context(), t.ID, from, to, note); err != nil {
-		httpErr(w, 500, "ошибка БД")
+	if err := s.App.AddException(r.Context(), u, from, to, in.Note); err != nil {
+		s.fail(w, err)
 		return
 	}
-	s.getSchedule(w, r, t)
+	s.getSchedule(w, r, u)
 }
 
-func (s *Server) deleteException(w http.ResponseWriter, r *http.Request, t store.Tutor) {
+func (s *Server) deleteException(w http.ResponseWriter, r *http.Request, u domain.User) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		httpErr(w, 400, "неверный id")
 		return
 	}
-	if err := s.S.DeleteException(r.Context(), t.ID, id); err != nil {
-		httpErr(w, 500, "ошибка БД")
+	if err := s.App.DeleteException(r.Context(), u, id); err != nil {
+		s.fail(w, err)
 		return
 	}
-	s.getSchedule(w, r, t)
+	s.getSchedule(w, r, u)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

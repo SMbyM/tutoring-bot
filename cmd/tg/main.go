@@ -59,7 +59,7 @@ func run() error {
 	}
 
 	srv := &http.Server{Addr: cfg.HTTPAddr, ReadHeaderTimeout: 10 * time.Second,
-		Handler: (&miniapp.Server{S: s, BotToken: cfg.BotToken, Debug: cfg.Debug()}).Handler()}
+		Handler: (&miniapp.Server{App: app, BotToken: cfg.BotToken, Log: slog.Default()}).Handler()}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("http", "err", err)

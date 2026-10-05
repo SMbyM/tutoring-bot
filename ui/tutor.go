@@ -11,32 +11,18 @@ import (
 	"github.com/SMbyM/tutoring-bot/msg"
 )
 
-func (e *Engine) requireTutor(r *req) error {
-	if r.role != domain.RoleTutor {
-		return domain.ErrNotAllowed
-	}
-	return e.S.EnsureTutor(r.ctx, r.u.ID)
-}
-
 // tutorWindows — недельные окна, исключения и длительность урока.
 func (e *Engine) tutorWindows(r *req) error {
-	if err := e.requireTutor(r); err != nil {
-		return err
-	}
-	ws, err := e.S.Windows(r.ctx, r.u.ID)
-	if err != nil {
-		return err
-	}
-	ex, err := e.S.Exceptions(r.ctx, r.u.ID, r.loc())
+	sc, err := e.App.MySchedule(r.ctx, r.u)
 	if err != nil {
 		return err
 	}
 	var b strings.Builder
 	b.WriteString("🕒 Окна для записи (каждую неделю):\n")
-	if len(ws) == 0 {
+	if len(sc.Windows) == 0 {
 		b.WriteString("пока не заданы — ученики не смогут записаться")
 	} else {
-		b.WriteString(domain.FormatWindows(ws))
+		b.WriteString(domain.FormatWindows(sc.Windows))
 	}
 	var rows [][]msg.Button
 	if e.MiniAppURL != "" {
@@ -45,9 +31,9 @@ func (e *Engine) tutorWindows(r *req) error {
 	rows = append(rows,
 		msg.Row(msg.Btn("✏️ Задать текстом", "twt")),
 		msg.Row(msg.Btn("🏖 Добавить отпуск / перерыв", "twe")))
-	if len(ex) > 0 {
+	if len(sc.Exceptions) > 0 {
 		b.WriteString("\n\n🏖 Недоступен:")
-		for _, x := range ex {
+		for _, x := range sc.Exceptions {
 			span := x.From.Format("02.01")
 			if !x.To.Equal(x.From) {
 				span += "–" + x.To.Format("02.01")
@@ -62,11 +48,12 @@ func (e *Engine) tutorWindows(r *req) error {
 }
 
 func (e *Engine) tutorProfile(r *req) error {
-	t, err := e.S.Tutor(r.ctx, r.u.ID)
+	sc, err := e.App.MySchedule(r.ctx, r.u)
 	if err != nil {
 		return err
 	}
-	subs, err := e.S.Subjects(r.ctx)
+	t := sc.Tutor
+	subs, err := e.App.Subjects(r.ctx)
 	if err != nil {
 		return err
 	}
@@ -101,24 +88,20 @@ func (e *Engine) tutorProfile(r *req) error {
 	return nil
 }
 
+// Права проверяет core: каждое действие ниже вернёт ErrNotAllowed, если пользователь не репетитор.
 func (e *Engine) tutorAction(r *req, p msg.Parsed) (bool, error) {
 	ctx, u := r.ctx, r.u
-	switch p.Name {
-	case "tw", "twt", "twe", "twx", "tst", "tp", "tpb", "tpd", "tps":
-		if err := e.requireTutor(r); err != nil {
-			return true, err
-		}
-	default:
-		return false, nil
-	}
 	switch p.Name {
 	case "tw":
 		return true, e.tutorWindows(r)
 	case "twt":
-		ws, _ := e.S.Windows(ctx, u.ID)
+		sc, err := e.App.MySchedule(ctx, u)
+		if err != nil {
+			return true, err
+		}
 		cur := ""
-		if len(ws) > 0 {
-			cur = "\n\nСейчас:\n" + domain.FormatWindows(ws)
+		if len(sc.Windows) > 0 {
+			cur = "\n\nСейчас:\n" + domain.FormatWindows(sc.Windows)
 		}
 		if err := e.S.SetState(ctx, u.ID, "windows", nil); err != nil {
 			return true, err
@@ -126,18 +109,21 @@ func (e *Engine) tutorAction(r *req, p msg.Parsed) (bool, error) {
 		r.screen("Отправьте окна одним сообщением, по строке на окно. Это заменит текущее расписание. Например:\n\nпн 15:00-19:00\nср, пт 10:00-13:00\nсб 11:00-15:00" + cur + "\n\n(/menu — отмена)")
 		return true, nil
 	case "twe":
+		if _, err := e.App.MySchedule(ctx, u); err != nil {
+			return true, err
+		}
 		if err := e.S.SetState(ctx, u.ID, "exception", nil); err != nil {
 			return true, err
 		}
 		r.screen("Когда вы недоступны? Например:\n\n20.10-26.10 отпуск\n03.11 сессия\n\n(/menu — отмена)")
 		return true, nil
 	case "twx":
-		if err := e.S.DeleteException(ctx, u.ID, p.Int(0)); err != nil {
+		if err := e.App.DeleteException(ctx, u, p.Int(0)); err != nil {
 			return true, err
 		}
 		return true, e.tutorWindows(r)
 	case "tst":
-		sts, err := e.S.TutorStudents(ctx, u.ID)
+		sts, err := e.App.MyStudents(ctx, u)
 		if err != nil {
 			return true, err
 		}
@@ -148,26 +134,28 @@ func (e *Engine) tutorAction(r *req, p msg.Parsed) (bool, error) {
 		var b strings.Builder
 		b.WriteString("👥 Ваши ученики (оплачено уроков):\n")
 		for _, s := range sts {
-			bal, _ := e.S.Balance(ctx, s.ID, u.ID)
-			fmt.Fprintf(&b, "\n• %s, %d кл. — %d", s.Name, s.Grade, bal)
+			fmt.Fprintf(&b, "\n• %s, %d кл. — %d", s.Student.Name, s.Student.Grade, s.Balance)
 		}
 		r.screen(b.String(), msg.Row(msg.Btn("⬅️ Назад", "home")))
 		return true, nil
 	case "tp":
 		return true, e.tutorProfile(r)
 	case "tpb":
+		if _, err := e.App.MySchedule(ctx, u); err != nil {
+			return true, err
+		}
 		if err := e.S.SetState(ctx, u.ID, "bio", nil); err != nil {
 			return true, err
 		}
 		r.screen("Напишите пару предложений о себе: опыт, с какими классами работаете, к чему готовите.")
 		return true, nil
 	case "tpd":
-		if err := e.S.SetTutorDuration(ctx, u.ID, int(p.Int(0))); err != nil {
+		if err := e.App.SetLessonMinutes(ctx, u, int(p.Int(0))); err != nil {
 			return true, err
 		}
 		return true, e.tutorProfile(r)
 	case "tps":
-		if err := e.S.ToggleTutorSubject(ctx, u.ID, int(p.Int(0))); err != nil {
+		if err := e.App.ToggleSubject(ctx, u, int(p.Int(0))); err != nil {
 			return true, err
 		}
 		return true, e.tutorProfile(r)
@@ -183,8 +171,8 @@ func (e *Engine) tutorText(r *req, state string, _ map[string]string, text strin
 		if err != nil {
 			return true, uerr(err)
 		}
-		if err := e.S.ReplaceWindows(ctx, u.ID, ws); err != nil {
-			return true, uerr(err)
+		if err := e.App.SetWindows(ctx, u, ws); err != nil {
+			return true, err
 		}
 		_ = e.S.ClearState(ctx, u.ID)
 		r.send("✅ Расписание сохранено. Уже записанные уроки не меняются.")
@@ -194,14 +182,14 @@ func (e *Engine) tutorText(r *req, state string, _ map[string]string, text strin
 		if err != nil {
 			return true, uerr(err)
 		}
-		if err := e.S.AddException(ctx, u.ID, from, to, note); err != nil {
+		if err := e.App.AddException(ctx, u, from, to, note); err != nil {
 			return true, err
 		}
 		_ = e.S.ClearState(ctx, u.ID)
 		r.send("✅ Добавлено. В эти дни записаться к вам не получится. Уже записанные уроки на эти даты перенесите или отмените вручную.")
 		return true, e.tutorWindows(r)
 	case "bio":
-		if err := e.S.SetTutorBio(ctx, u.ID, trim(text, 800)); err != nil {
+		if err := e.App.SetBio(ctx, u, text); err != nil {
 			return true, err
 		}
 		_ = e.S.ClearState(ctx, u.ID)

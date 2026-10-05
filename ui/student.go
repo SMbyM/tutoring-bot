@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SMbyM/tutoring-bot/core"
 	"github.com/SMbyM/tutoring-bot/domain"
 	"github.com/SMbyM/tutoring-bot/msg"
 )
@@ -20,11 +21,8 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 	ctx, u := r.ctx, r.u
 	switch p.Name {
 	case "nb": // выбор предмета
-		studentID := p.Int(0)
-		if err := e.App.CanActForStudent(ctx, u, studentID); err != nil {
-			return true, err
-		}
-		subs, err := e.S.Subjects(ctx)
+		studentID := p.Int(0) // права на ученика проверит core на следующем шаге
+		subs, err := e.App.Subjects(ctx)
 		if err != nil {
 			return true, err
 		}
@@ -38,7 +36,7 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 
 	case "ns": // список репетиторов по предмету
 		studentID, subjectID := p.Int(0), int(p.Int(1))
-		ts, err := e.S.TutorsBySubject(ctx, subjectID)
+		ts, err := e.App.TutorsForSubject(ctx, u, studentID, subjectID)
 		if err != nil {
 			return true, err
 		}
@@ -48,11 +46,11 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 		}
 		var rows [][]msg.Button
 		for _, t := range ts {
-			label := t.Name
-			if ok, _ := e.S.IsEnrolled(ctx, studentID, t.ID, subjectID); ok {
+			label := t.Tutor.Name
+			if t.Enrolled {
 				label = "⭐ " + label + " (ваш репетитор)"
 			}
-			rows = append(rows, msg.Row(msg.Btn(label, "tc", studentID, subjectID, t.ID)))
+			rows = append(rows, msg.Row(msg.Btn(label, "tc", studentID, subjectID, t.Tutor.ID)))
 		}
 		rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", "nb", studentID)))
 		r.screen("Выберите репетитора. У каждого можно взять один бесплатный пробный урок.", rows...)
@@ -60,26 +58,11 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 
 	case "tc": // карточка репетитора
 		studentID, subjectID, tutorID := p.Int(0), int(p.Int(1)), p.Int(2)
-		t, err := e.S.Tutor(ctx, tutorID)
+		o, err := e.App.TutorOffer(ctx, u, studentID, subjectID, tutorID)
 		if err != nil {
 			return true, err
 		}
-		price, err := e.App.TutorUnitPrice(ctx, tutorID)
-		if err != nil {
-			return true, err
-		}
-		enrolled, err := e.S.IsEnrolled(ctx, studentID, tutorID, subjectID)
-		if err != nil {
-			return true, err
-		}
-		trialUsed, err := e.S.HasTrial(ctx, studentID, tutorID)
-		if err != nil {
-			return true, err
-		}
-		liked, err := e.S.LikedTutor(ctx, studentID, tutorID)
-		if err != nil {
-			return true, err
-		}
+		t, price, enrolled, liked, trialUsed := o.Tutor, o.Price, o.Enrolled, o.Liked, o.TrialUsed
 		var b strings.Builder
 		fmt.Fprintf(&b, "👩‍🏫 %s\n", t.Name)
 		if t.Bio != "" {
@@ -107,10 +90,7 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 
 	case "bk": // выбор дня
 		tutorID, subjectID, studentID, mode := p.Int(0), int(p.Int(1)), p.Int(2), p.Str(3)
-		if err := e.App.CanActForStudent(ctx, u, studentID); err != nil {
-			return true, err
-		}
-		slots, _, err := e.App.FreeSlots(ctx, tutorID, studentID, 0)
+		slots, _, err := e.App.FreeSlots(ctx, u, tutorID, studentID, 0)
 		if err != nil {
 			return true, err
 		}
@@ -126,7 +106,7 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 
 	case "bd": // выбор времени
 		tutorID, subjectID, studentID, mode, day := p.Int(0), int(p.Int(1)), p.Int(2), p.Str(3), p.Str(4)
-		slots, _, err := e.App.FreeSlots(ctx, tutorID, studentID, 0)
+		slots, _, err := e.App.FreeSlots(ctx, u, tutorID, studentID, 0)
 		if err != nil {
 			return true, err
 		}
@@ -174,10 +154,7 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 
 	case "py": // баланс по репетиторам
 		studentID := p.Int(0)
-		if err := e.App.CanActForStudent(ctx, u, studentID); err != nil {
-			return true, err
-		}
-		ens, err := e.S.ActiveEnrollments(ctx, studentID)
+		ens, err := e.App.Balances(ctx, u, studentID)
 		if err != nil {
 			return true, err
 		}
@@ -190,11 +167,7 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 		b.WriteString("💳 Оплаченные уроки:\n")
 		var rows [][]msg.Button
 		for _, en := range ens {
-			bal, err := e.S.Balance(ctx, studentID, en.TutorID)
-			if err != nil {
-				return true, err
-			}
-			fmt.Fprintf(&b, "\n• %s (%s): %d", en.TutorName, en.Subject, bal)
+			fmt.Fprintf(&b, "\n• %s (%s): %d", en.TutorName, en.Subject, en.Balance)
 			rows = append(rows, msg.Row(msg.Btn("Оплатить — "+en.TutorName, "pay", studentID, en.TutorID)))
 		}
 		rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", "home")))
@@ -203,24 +176,17 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 
 	case "pay": // тарифы
 		studentID, tutorID := p.Int(0), p.Int(1)
-		if err := e.App.CanActForStudent(ctx, u, studentID); err != nil {
-			return true, err
-		}
-		unit, err := e.App.TutorUnitPrice(ctx, tutorID)
-		if err != nil {
-			return true, err
-		}
-		ps, err := e.S.Products(ctx, true)
+		offers, err := e.App.Offers(ctx, u, studentID, tutorID)
 		if err != nil {
 			return true, err
 		}
 		var rows [][]msg.Button
-		for _, pr := range ps {
-			label := fmt.Sprintf("%s — %s", pr.Name, domain.FormatRub(domain.PriceOf(pr, unit)))
-			if pr.DiscountPct > 0 {
-				label += fmt.Sprintf(" (−%d%%)", pr.DiscountPct)
+		for _, o := range offers {
+			label := fmt.Sprintf("%s — %s", o.Product.Name, domain.FormatRub(o.Price))
+			if o.Product.DiscountPct > 0 {
+				label += fmt.Sprintf(" (−%d%%)", o.Product.DiscountPct)
 			}
-			rows = append(rows, msg.Row(msg.Btn(label, "pp", studentID, tutorID, pr.ID)))
+			rows = append(rows, msg.Row(msg.Btn(label, "pp", studentID, tutorID, o.Product.ID)))
 		}
 		rows = append(rows, msg.Row(msg.Btn("⬅️ Назад", "py", studentID)))
 		r.screen("Выберите вариант оплаты.\n🧪 Сейчас оплата тестовая: деньги не списываются, уроки начисляются сразу.", rows...)
@@ -235,36 +201,30 @@ func (e *Engine) studentAction(r *req, p msg.Parsed) (bool, error) {
 		return true, nil
 
 	case "pinv": // ученик приглашает родителя
-		code := newCode()
-		if err := e.S.CreateInvite(ctx, storeInvite(code, "parent_link", u.ID), 7*24*time.Hour); err != nil {
+		payload, err := e.App.CreateInvite(ctx, u, core.InviteParent)
+		if err != nil {
 			return true, err
 		}
-		r.screen("Перешлите эту ссылку родителю — после перехода аккаунты свяжутся. Ссылка одноразовая, действует 7 дней:\n\n"+e.BotLink("p_"+code),
+		r.screen("Перешлите эту ссылку родителю — после перехода аккаунты свяжутся. Ссылка одноразовая, действует 7 дней:\n\n"+e.BotLink(payload),
 			msg.Row(msg.Btn("⬅️ Назад", "home")))
 		return true, nil
 
 	case "fb": // отзыв о пробном
-		id, text, err := e.App.LeaveFeedback(ctx, u, p.Int(0), p.Str(1) == "1")
+		f, err := e.App.LeaveFeedback(ctx, u, p.Int(0), p.Str(1) == "1")
 		if err != nil {
 			return true, err
 		}
-		if id == 0 {
-			r.screen(text)
+		if f.ID == 0 {
+			r.screen(f.Text)
 			return true, nil
 		}
-		rows := [][]msg.Button{msg.Row(msg.Btn("💬 Добавить комментарий", "fbc", id))}
-		if p.Str(1) == "1" {
-			l, err := e.S.Lesson(ctx, p.Int(0))
-			if err == nil {
-				rows = append([][]msg.Button{msg.Row(msg.Btn("🤝 Заниматься у этого репетитора", "enr", l.TutorID, l.SubjectID, l.StudentID))}, rows...)
-			}
+		rows := [][]msg.Button{msg.Row(msg.Btn("💬 Добавить комментарий", "fbc", f.ID))}
+		if f.Liked {
+			rows = append([][]msg.Button{msg.Row(msg.Btn("🤝 Заниматься у этого репетитора", "enr", f.TutorID, f.SubjectID, f.StudentID))}, rows...)
 		} else {
-			l, err := e.S.Lesson(ctx, p.Int(0))
-			if err == nil {
-				rows = append(rows, msg.Row(msg.Btn("🔎 Другие репетиторы", "ns", l.StudentID, l.SubjectID)))
-			}
+			rows = append(rows, msg.Row(msg.Btn("🔎 Другие репетиторы", "ns", f.StudentID, f.SubjectID)))
 		}
-		r.screen(text, rows...)
+		r.screen(f.Text, rows...)
 		return true, nil
 
 	case "fbc":
