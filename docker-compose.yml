@@ -26,6 +26,9 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:8080:8080" # Mini App; наружу — через HTTPS-прокси (Caddy/nginx)
+    extra_hosts:
+      # прокси/VPN-клиент на хосте доступен из контейнера как host.docker.internal (нужно на Linux)
+      - "host.docker.internal:host-gateway"
 
   # Фоновые задачи. Не ходит в мессенджеры — пишет в outbox. Достаточно одного экземпляра,
   # но второй не навредит: все задачи идемпотентны.

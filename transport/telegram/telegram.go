@@ -31,7 +31,7 @@ type Adapter struct {
 // New подключается к Bot API. apiURL — свой адрес Bot API (через туннель/прокси), пусто — стандартный.
 func New(ctx context.Context, token, apiURL string, eng *ui.Engine, channelID int64) (*Adapter, error) {
 	a := &Adapter{eng: eng, channelID: channelID, log: slog.Default()}
-	opts := []bot.Option{bot.WithDefaultHandler(a.handle), bot.WithErrorsHandler(func(err error) {
+	opts := []bot.Option{bot.WithCheckInitTimeout(20 * time.Second), bot.WithDefaultHandler(a.handle), bot.WithErrorsHandler(func(err error) {
 		a.log.Warn("telegram", "err", err)
 	})}
 	if apiURL != "" {
@@ -39,7 +39,8 @@ func New(ctx context.Context, token, apiURL string, eng *ui.Engine, channelID in
 	}
 	b, err := bot.New(token, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("telegram: %w", err)
+		return nil, fmt.Errorf("нет связи с Telegram Bot API (%w). Из РФ нужен прокси: HTTPS_PROXY=socks5://host:port "+
+			"или http://host:port, либо свой адрес Bot API в TELEGRAM_API_URL", err)
 	}
 	a.b = b
 	me, err := b.GetMe(ctx)
