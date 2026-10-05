@@ -1,12 +1,16 @@
 TEST_DATABASE_URL ?= postgres://bot:bot@localhost:5433/bot_test?sslmode=disable
 
-.PHONY: run-tg run-worker test test-db lint up down
+.PHONY: run-tg run-worker generate test test-db lint up down
 
 run-tg:
 	go run ./cmd/tg
 
 run-worker:
 	go run ./cmd/worker
+
+# Код доступа к БД из store/queries/*.sql (нужен sqlc 1.30+)
+generate:
+	sqlc generate
 
 # Юнит-тесты без базы
 test:
@@ -19,7 +23,7 @@ test-db:
 	TEST_DATABASE_URL=$(TEST_DATABASE_URL) go test -p 1 -race -cover ./... ; status=$$?; docker stop bot-test-db; exit $$status
 
 lint:
-	gofmt -l . && go vet ./...
+	sqlc diff && gofmt -l . && go vet ./...
 
 up:
 	docker compose up -d --build
