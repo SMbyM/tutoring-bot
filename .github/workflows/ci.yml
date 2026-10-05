@@ -22,6 +22,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: sqlc-dev/setup-sqlc@v4
+        with:
+          sqlc-version: "1.30.0"
+      - name: sqlc — сгенерированный код совпадает с запросами
+        run: sqlc diff
       - name: gofmt
         run: test -z "$(gofmt -l .)"
       - name: vet

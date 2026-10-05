@@ -6,118 +6,92 @@ import (
 	"time"
 
 	"github.com/SMbyM/tutoring-bot/domain"
+	"github.com/SMbyM/tutoring-bot/store/db"
 )
 
-const lessonSelect = `SELECT l.id, l.student_id, l.tutor_id, l.subject_id, sb.name, su.name, tu.name,
-	l.starts_at, l.duration_min, l.kind, l.status, COALESCE(l.recurring_slot_id,0), l.late_cancel, l.cancel_reason
-	FROM lessons l JOIN subjects sb ON sb.id=l.subject_id JOIN users su ON su.id=l.student_id JOIN users tu ON tu.id=l.tutor_id `
-
-func scanLesson(sc interface{ Scan(...any) error }) (domain.Lesson, error) {
-	var l domain.Lesson
-	var mins int
-	var kind, status string
-	err := sc.Scan(&l.ID, &l.StudentID, &l.TutorID, &l.SubjectID, &l.Subject, &l.StudentName, &l.TutorName,
-		&l.StartsAt, &mins, &kind, &status, &l.RecurringID, &l.LateCancel, &l.Reason)
-	l.Duration = time.Duration(mins) * time.Minute
-	l.Kind, l.Status = domain.LessonKind(kind), domain.LessonStatus(status)
-	return l, err
+func lessonFromDB(l db.LessonDetail) domain.Lesson {
+	return domain.Lesson{
+		ID: l.ID, StudentID: l.StudentID, TutorID: l.TutorID, SubjectID: int(l.SubjectID),
+		Subject: l.Subject, StudentName: l.StudentName, TutorName: l.TutorName,
+		StartsAt: l.StartsAt, Duration: time.Duration(l.DurationMin) * time.Minute,
+		Kind: domain.LessonKind(l.Kind), Status: domain.LessonStatus(l.Status),
+		RecurringID: l.RecurringSlotID.Int64, LateCancel: l.LateCancel, Reason: l.CancelReason,
+	}
 }
 
-func (s *Store) lessons(ctx context.Context, where string, args ...any) ([]domain.Lesson, error) {
-	rows, err := s.q.QueryContext(ctx, lessonSelect+where, args...)
+func lessonsFromDB(ls []db.LessonDetail, err error) ([]domain.Lesson, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []domain.Lesson
-	for rows.Next() {
-		l, err := scanLesson(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, l)
+	out := make([]domain.Lesson, len(ls))
+	for i, l := range ls {
+		out[i] = lessonFromDB(l)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
+func nullID(id int64) sql.NullInt64 { return sql.NullInt64{Int64: id, Valid: id != 0} }
+
+func minutes(d time.Duration) int32 { return int32(d / time.Minute) }
+
 func (s *Store) Lesson(ctx context.Context, id int64) (domain.Lesson, error) {
-	l, err := scanLesson(s.q.QueryRowContext(ctx, lessonSelect+`WHERE l.id=$1`, id))
+	l, err := s.qs().LessonByID(ctx, id)
 	if notFound(err) {
-		return l, domain.ErrNotFound
+		return domain.Lesson{}, domain.ErrNotFound
 	}
-	return l, err
+	if err != nil {
+		return domain.Lesson{}, err
+	}
+	return lessonFromDB(l), nil
 }
 
 // LockTutor берёт транзакционную advisory-блокировку на расписание репетитора,
 // чтобы две параллельные записи не заняли одно окно.
 func (s *Store) LockTutor(ctx context.Context, tutorID int64) error {
-	_, err := s.q.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1::bigint)`, tutorID)
-	return err
+	return s.qs().LockTutor(ctx, tutorID)
 }
 
 // Busy — запланированные уроки репетитора или ученика, пересекающие [from, to). excludeID не учитывается.
 func (s *Store) Busy(ctx context.Context, tutorID, studentID int64, from, to time.Time, excludeID int64) ([]domain.Interval, error) {
-	rows, err := s.q.QueryContext(ctx, `SELECT starts_at, starts_at + make_interval(mins => duration_min) FROM lessons
-		WHERE status='scheduled' AND (tutor_id=$1 OR student_id=$2) AND id<>$5
-		AND starts_at < $4 AND starts_at + make_interval(mins => duration_min) > $3`, tutorID, studentID, from, to, excludeID)
+	rows, err := s.qs().BusyIntervals(ctx, db.BusyIntervalsParams{TutorID: tutorID, StudentID: studentID,
+		ExcludeID: excludeID, FromTime: from, ToTime: to})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []domain.Interval
-	for rows.Next() {
-		var iv domain.Interval
-		if err := rows.Scan(&iv.Start, &iv.End); err != nil {
-			return nil, err
-		}
-		out = append(out, iv)
+	out := make([]domain.Interval, len(rows))
+	for i, r := range rows {
+		out[i] = domain.Interval{Start: r.StartsAt, End: r.EndsAt}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Store) InsertLesson(ctx context.Context, l domain.Lesson) (int64, error) {
-	var rec any
-	if l.RecurringID != 0 {
-		rec = l.RecurringID
-	}
-	var id int64
-	err := s.q.QueryRowContext(ctx, `INSERT INTO lessons(student_id, tutor_id, subject_id, starts_at, duration_min, kind, recurring_slot_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`, l.StudentID, l.TutorID, l.SubjectID, l.StartsAt,
-		int(l.Duration/time.Minute), string(l.Kind), rec).Scan(&id)
-	return id, err
+	return s.qs().InsertLesson(ctx, db.InsertLessonParams{StudentID: l.StudentID, TutorID: l.TutorID, SubjectID: int32(l.SubjectID),
+		StartsAt: l.StartsAt, DurationMin: minutes(l.Duration), Kind: string(l.Kind), RecurringSlotID: nullID(l.RecurringID)})
 }
 
 func (s *Store) HasTrial(ctx context.Context, studentID, tutorID int64) (bool, error) {
-	var ok bool
-	err := s.q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM lessons WHERE student_id=$1 AND tutor_id=$2 AND kind='trial' AND status<>'cancelled')`,
-		studentID, tutorID).Scan(&ok)
-	return ok, err
+	return s.qs().HasTrial(ctx, db.HasTrialParams{StudentID: studentID, TutorID: tutorID})
 }
 
 func (s *Store) UpcomingForStudent(ctx context.Context, studentID int64, limit int) ([]domain.Lesson, error) {
-	return s.lessons(ctx, `WHERE l.student_id=$1 AND l.status='scheduled' AND l.starts_at + make_interval(mins => l.duration_min) > now()
-		ORDER BY l.starts_at LIMIT $2`, studentID, limit)
+	return lessonsFromDB(s.qs().UpcomingForStudent(ctx, db.UpcomingForStudentParams{StudentID: studentID, MaxRows: int32(limit)}))
 }
 
 func (s *Store) UpcomingForTutor(ctx context.Context, tutorID int64, limit int) ([]domain.Lesson, error) {
-	return s.lessons(ctx, `WHERE l.tutor_id=$1 AND l.status='scheduled' AND l.starts_at + make_interval(mins => l.duration_min) > now()
-		ORDER BY l.starts_at LIMIT $2`, tutorID, limit)
+	return lessonsFromDB(s.qs().UpcomingForTutor(ctx, db.UpcomingForTutorParams{TutorID: tutorID, MaxRows: int32(limit)}))
 }
 
 func (s *Store) MoveLesson(ctx context.Context, id int64, start time.Time, late bool, reason string) error {
-	_, err := s.q.ExecContext(ctx, `UPDATE lessons SET starts_at=$2, late_cancel = late_cancel OR $3,
-		cancel_reason = CASE WHEN $4 <> '' THEN $4 ELSE cancel_reason END, recurring_slot_id=NULL,
-		mark_prompted=false WHERE id=$1 AND status='scheduled'`, id, start, late, reason)
-	return err
+	return s.qs().MoveLesson(ctx, db.MoveLessonParams{ID: id, StartsAt: start, Late: late, Reason: reason})
 }
 
 func (s *Store) CancelLesson(ctx context.Context, id, by int64, reason string, late bool) error {
-	res, err := s.q.ExecContext(ctx, `UPDATE lessons SET status='cancelled', cancelled_by=$2, cancel_reason=$3, late_cancel=$4
-		WHERE id=$1 AND status='scheduled'`, id, by, reason, late)
+	n, err := s.qs().CancelLesson(ctx, db.CancelLessonParams{ID: id, CancelledBy: nullID(by), CancelReason: reason, LateCancel: late})
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if n == 0 {
 		return domain.ErrNotScheduled
 	}
 	return nil
@@ -125,53 +99,43 @@ func (s *Store) CancelLesson(ctx context.Context, id, by int64, reason string, l
 
 // SetStatus переводит урок из «запланирован» в итоговый статус. ok=false, если урок уже отмечен.
 func (s *Store) SetStatus(ctx context.Context, id int64, st domain.LessonStatus, auto bool) (bool, error) {
-	res, err := s.q.ExecContext(ctx, `UPDATE lessons SET status=$2, marked_auto=$3 WHERE id=$1 AND status='scheduled'`, id, string(st), auto)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n == 1, nil
+	n, err := s.qs().SetLessonStatus(ctx, db.SetLessonStatusParams{ID: id, Status: string(st), MarkedAuto: auto})
+	return n == 1, err
 }
 
 // LessonsToPrompt — закончившиеся, но не отмеченные уроки, по которым ещё не спрашивали репетитора.
 func (s *Store) LessonsToPrompt(ctx context.Context, now time.Time) ([]domain.Lesson, error) {
-	return s.lessons(ctx, `WHERE l.status='scheduled' AND NOT l.mark_prompted
-		AND l.starts_at + make_interval(mins => l.duration_min) <= $1 ORDER BY l.starts_at LIMIT 100`, now)
+	return lessonsFromDB(s.qs().LessonsToPrompt(ctx, now))
 }
 
 // ClaimPrompt атомарно помечает, что репетитора спросили про урок. ok=false — уже спросил другой процесс.
 func (s *Store) ClaimPrompt(ctx context.Context, id int64) (bool, error) {
-	res, err := s.q.ExecContext(ctx, `UPDATE lessons SET mark_prompted=true WHERE id=$1 AND NOT mark_prompted AND status='scheduled'`, id)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n == 1, nil
+	n, err := s.qs().ClaimPrompt(ctx, id)
+	return n == 1, err
 }
 
 func (s *Store) LessonsToAutoHold(ctx context.Context, now time.Time) ([]domain.Lesson, error) {
-	return s.lessons(ctx, `WHERE l.status='scheduled' AND l.starts_at + make_interval(mins => l.duration_min) <= $1
-		ORDER BY l.starts_at LIMIT 100`, now.Add(-domain.AutoHeldAfter))
+	return lessonsFromDB(s.qs().LessonsEndedBefore(ctx, now.Add(-domain.AutoHeldAfter)))
 }
 
 func (s *Store) LessonsStartingBetween(ctx context.Context, from, to time.Time) ([]domain.Lesson, error) {
-	return s.lessons(ctx, `WHERE l.status='scheduled' AND l.starts_at >= $1 AND l.starts_at < $2 ORDER BY l.starts_at`, from, to)
+	return lessonsFromDB(s.qs().LessonsStartingBetween(ctx, db.LessonsStartingBetweenParams{FromTime: from, ToTime: to}))
 }
 
 // TryLogReminder возвращает true, если напоминание этого вида этому пользователю ещё не отправлялось.
 func (s *Store) TryLogReminder(ctx context.Context, lessonID, userID int64, kind string) (bool, error) {
-	res, err := s.q.ExecContext(ctx, `INSERT INTO reminder_log(lesson_id, user_id, kind) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
-		lessonID, userID, kind)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n == 1, nil
+	n, err := s.qs().LogReminder(ctx, db.LogReminderParams{LessonID: lessonID, UserID: userID, Kind: kind})
+	return n == 1, err
 }
 
 // LateCancels — последние поздние отмены/переносы (для админа).
 func (s *Store) LateCancels(ctx context.Context, limit int) ([]domain.Lesson, error) {
-	return s.lessons(ctx, `WHERE l.late_cancel ORDER BY l.starts_at DESC LIMIT $1`, limit)
+	return lessonsFromDB(s.qs().LateCancels(ctx, int32(limit)))
+}
+
+// DebugShiftLesson двигает урок в прошлое (только для debug-режима: проверить отметки и отзывы без ожидания).
+func (s *Store) DebugShiftLesson(ctx context.Context, id int64, start time.Time) error {
+	return s.qs().DebugShiftLesson(ctx, db.DebugShiftLessonParams{ID: id, StartsAt: start})
 }
 
 // ---- постоянные слоты ----
@@ -186,76 +150,60 @@ type Recurring struct {
 	Duration  time.Duration
 }
 
+func recurringFromDB(r db.RecurringSlot) Recurring {
+	return Recurring{ID: r.ID, StudentID: r.StudentID, TutorID: r.TutorID, SubjectID: int(r.SubjectID),
+		Weekday: time.Weekday(r.Weekday), StartMin: int(r.StartMin), Duration: time.Duration(r.DurationMin) * time.Minute}
+}
+
 func (s *Store) InsertRecurring(ctx context.Context, r Recurring) (int64, error) {
-	var id int64
-	err := s.q.QueryRowContext(ctx, `INSERT INTO recurring_slots(student_id, tutor_id, subject_id, weekday, start_min, duration_min)
-		VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`, r.StudentID, r.TutorID, r.SubjectID, int(r.Weekday), r.StartMin,
-		int(r.Duration/time.Minute)).Scan(&id)
-	return id, err
+	return s.qs().InsertRecurring(ctx, db.InsertRecurringParams{StudentID: r.StudentID, TutorID: r.TutorID,
+		SubjectID: int32(r.SubjectID), Weekday: int16(r.Weekday), StartMin: int32(r.StartMin), DurationMin: minutes(r.Duration)})
 }
 
 func (s *Store) ActiveRecurring(ctx context.Context) ([]Recurring, error) {
-	return s.recurring(ctx, `WHERE active`)
-}
-
-func (s *Store) RecurringByID(ctx context.Context, id int64) (Recurring, error) {
-	rs, err := s.recurring(ctx, `WHERE id=$1`, id)
-	if err != nil {
-		return Recurring{}, err
-	}
-	if len(rs) == 0 {
-		return Recurring{}, domain.ErrNotFound
-	}
-	return rs[0], nil
-}
-
-func (s *Store) recurring(ctx context.Context, where string, args ...any) ([]Recurring, error) {
-	rows, err := s.q.QueryContext(ctx, `SELECT id, student_id, tutor_id, subject_id, weekday, start_min, duration_min FROM recurring_slots `+where, args...)
+	rows, err := s.qs().ActiveRecurring(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []Recurring
-	for rows.Next() {
-		var r Recurring
-		var wd, mins int
-		if err := rows.Scan(&r.ID, &r.StudentID, &r.TutorID, &r.SubjectID, &wd, &r.StartMin, &mins); err != nil {
-			return nil, err
-		}
-		r.Weekday, r.Duration = time.Weekday(wd), time.Duration(mins)*time.Minute
-		out = append(out, r)
+	out := make([]Recurring, len(rows))
+	for i, r := range rows {
+		out[i] = recurringFromDB(r)
 	}
-	return out, rows.Err()
+	return out, nil
+}
+
+func (s *Store) RecurringByID(ctx context.Context, id int64) (Recurring, error) {
+	r, err := s.qs().RecurringByID(ctx, id)
+	if notFound(err) {
+		return Recurring{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return Recurring{}, err
+	}
+	return recurringFromDB(r), nil
 }
 
 // StopRecurring закрывает постоянный слот и отменяет его будущие уроки. Возвращает число отменённых.
 func (s *Store) StopRecurring(ctx context.Context, id, by int64, reason string) (int, error) {
 	var n int64
 	err := s.Tx(ctx, func(t *Store) error {
-		if _, err := t.q.ExecContext(ctx, `UPDATE recurring_slots SET active=false WHERE id=$1`, id); err != nil {
+		q := t.qs()
+		if err := q.DeactivateRecurring(ctx, id); err != nil {
 			return err
 		}
-		res, err := t.q.ExecContext(ctx, `UPDATE lessons SET status='cancelled', cancelled_by=$2, cancel_reason=$3
-			WHERE recurring_slot_id=$1 AND status='scheduled' AND starts_at > now()`, id, by, reason)
-		if err != nil {
-			return err
-		}
-		n, _ = res.RowsAffected()
-		return nil
+		var err error
+		n, err = q.CancelFutureRecurringLessons(ctx, db.CancelFutureRecurringLessonsParams{
+			SlotID: nullID(id), CancelledBy: nullID(by), CancelReason: reason})
+		return err
 	})
 	return int(n), err
 }
 
 // InsertRecurringLesson создаёт урок постоянного слота, если такого ещё нет. ok=false — уже был.
 func (s *Store) InsertRecurringLesson(ctx context.Context, l domain.Lesson) (bool, error) {
-	res, err := s.q.ExecContext(ctx, `INSERT INTO lessons(student_id, tutor_id, subject_id, starts_at, duration_min, kind, recurring_slot_id)
-		VALUES ($1,$2,$3,$4,$5,'regular',$6) ON CONFLICT DO NOTHING`, l.StudentID, l.TutorID, l.SubjectID, l.StartsAt,
-		int(l.Duration/time.Minute), l.RecurringID)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n == 1, nil
+	n, err := s.qs().InsertRecurringLesson(ctx, db.InsertRecurringLessonParams{StudentID: l.StudentID, TutorID: l.TutorID,
+		SubjectID: int32(l.SubjectID), StartsAt: l.StartsAt, DurationMin: minutes(l.Duration), RecurringSlotID: nullID(l.RecurringID)})
+	return n == 1, err
 }
 
 // ---- запросы на перенос/отмену ----
@@ -271,24 +219,27 @@ type ChangeRequest struct {
 }
 
 func (s *Store) InsertChangeRequest(ctx context.Context, r ChangeRequest) (int64, error) {
-	var id int64
-	err := s.q.QueryRowContext(ctx, `INSERT INTO change_requests(lesson_id, requested_by, kind, new_starts_at, reason)
-		VALUES ($1,$2,$3,$4,$5) RETURNING id`, r.LessonID, r.RequestedBy, r.Kind, r.NewStart, r.Reason).Scan(&id)
-	return id, err
+	p := db.InsertChangeRequestParams{LessonID: r.LessonID, RequestedBy: r.RequestedBy, Kind: r.Kind, Reason: r.Reason}
+	if r.NewStart != nil {
+		p.NewStartsAt = sql.NullTime{Time: *r.NewStart, Valid: true}
+	}
+	return s.qs().InsertChangeRequest(ctx, p)
 }
 
 func (s *Store) ChangeRequest(ctx context.Context, id int64) (ChangeRequest, error) {
-	var r ChangeRequest
-	var ns sql.NullTime
-	err := s.q.QueryRowContext(ctx, `SELECT id, lesson_id, requested_by, kind, new_starts_at, reason, status FROM change_requests WHERE id=$1`, id).
-		Scan(&r.ID, &r.LessonID, &r.RequestedBy, &r.Kind, &ns, &r.Reason, &r.Status)
+	r, err := s.qs().ChangeRequestByID(ctx, id)
 	if notFound(err) {
-		return r, domain.ErrNotFound
+		return ChangeRequest{}, domain.ErrNotFound
 	}
-	if ns.Valid {
-		r.NewStart = &ns.Time
+	if err != nil {
+		return ChangeRequest{}, err
 	}
-	return r, err
+	out := ChangeRequest{ID: r.ID, LessonID: r.LessonID, RequestedBy: r.RequestedBy, Kind: r.Kind, Reason: r.Reason, Status: r.Status}
+	if r.NewStartsAt.Valid {
+		t := r.NewStartsAt.Time
+		out.NewStart = &t
+	}
+	return out, nil
 }
 
 // DecideChangeRequest — ok=false, если запрос уже решён (например, вторым родителем).
@@ -297,16 +248,6 @@ func (s *Store) DecideChangeRequest(ctx context.Context, id int64, approved bool
 	if approved {
 		st = "approved"
 	}
-	res, err := s.q.ExecContext(ctx, `UPDATE change_requests SET status=$2, decided_by=$3 WHERE id=$1 AND status='pending'`, id, st, by)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n == 1, nil
-}
-
-// DebugShiftLesson двигает урок в прошлое (только для debug-режима: проверить отметки и отзывы без ожидания).
-func (s *Store) DebugShiftLesson(ctx context.Context, id int64, start time.Time) error {
-	_, err := s.q.ExecContext(ctx, `UPDATE lessons SET starts_at=$2, mark_prompted=false WHERE id=$1 AND status='scheduled'`, id, start)
-	return err
+	n, err := s.qs().DecideChangeRequest(ctx, db.DecideChangeRequestParams{ID: id, Status: st, DecidedBy: nullID(by)})
+	return n == 1, err
 }

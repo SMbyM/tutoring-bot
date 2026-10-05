@@ -11,47 +11,47 @@ import (
 	"strings"
 
 	_ "github.com/lib/pq"
+
+	"github.com/SMbyM/tutoring-bot/store/db"
 )
 
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-type querier interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+// Store — хранилище поверх запросов, сгенерированных sqlc (пакет store/db, SQL — в store/queries).
+// Работает либо поверх пула соединений, либо внутри транзакции (см. Tx).
+type Store struct {
+	pool *sql.DB
+	q    db.DBTX
 }
 
-// Store работает либо поверх пула соединений, либо внутри транзакции (см. Tx).
-type Store struct {
-	db *sql.DB
-	q  querier
-}
+// qs — сгенерированные запросы поверх текущего соединения (пул или транзакция).
+func (s *Store) qs() *db.Queries { return db.New(s.q) }
 
 func Open(ctx context.Context, url string) (*Store, error) {
-	db, err := sql.Open("postgres", url)
+	conn, err := sql.Open("postgres", url)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(10)
-	if err := db.PingContext(ctx); err != nil {
+	conn.SetMaxOpenConns(10)
+	if err := conn.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("подключение к БД: %w", err)
 	}
-	return &Store{db: db, q: db}, nil
+	return &Store{pool: conn, q: conn}, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error { return s.pool.Close() }
 
 // Tx выполняет fn в транзакции. Вложенный вызов внутри транзакции переиспользует её.
 func (s *Store) Tx(ctx context.Context, fn func(*Store) error) error {
 	if _, inTx := s.q.(*sql.Tx); inTx {
 		return fn(s)
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.pool.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if err := fn(&Store{db: s.db, q: tx}); err != nil {
+	if err := fn(&Store{pool: s.pool, q: tx}); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -61,7 +61,7 @@ func (s *Store) Tx(ctx context.Context, fn func(*Store) error) error {
 // Migrate применяет встроенные SQL-миграции по порядку имён файлов.
 // Бот и воркер стартуют одновременно, поэтому миграции идут под общей advisory-блокировкой.
 func (s *Store) Migrate(ctx context.Context) error {
-	conn, err := s.db.Conn(ctx)
+	conn, err := s.pool.Conn(ctx)
 	if err != nil {
 		return err
 	}
@@ -71,7 +71,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	defer conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, migrationLock) //nolint:errcheck
-	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+	if _, err := s.pool.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
 		return err
 	}
@@ -88,7 +88,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	sort.Strings(names)
 	for _, name := range names {
 		var exists bool
-		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name=$1)`, name).Scan(&exists); err != nil {
+		if err := s.pool.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name=$1)`, name).Scan(&exists); err != nil {
 			return err
 		}
 		if exists {
@@ -114,7 +114,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 
 // ResetForTests удаляет все данные (только для тестов).
 func (s *Store) ResetForTests(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`)
+	_, err := s.pool.ExecContext(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`)
 	if err != nil {
 		return err
 	}
