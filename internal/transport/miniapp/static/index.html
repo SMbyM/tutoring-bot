@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Расписание</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #1c1c1e);
+    --hint: var(--tg-theme-hint-color, #8e8e93);
+    --accent: var(--tg-theme-button-color, #2f6fd6);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --card: var(--tg-theme-secondary-bg-color, #f2f2f7);
+    --danger: #d64545;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+         font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 20px 0 8px; color: var(--hint); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+  .hint { color: var(--hint); font-size: 13px; }
+  .day { background: var(--card); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; }
+  .day-head { display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
+  .slot { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  input[type=time], input[type=date], input[type=text], select {
+    font: inherit; color: var(--text); background: var(--bg); border: 1px solid color-mix(in srgb, var(--hint) 40%, transparent);
+    border-radius: 8px; padding: 6px 8px; min-width: 0; }
+  .slot input[type=time] { flex: 1; }
+  button { font: inherit; border: 0; border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+  .add { background: transparent; color: var(--accent); padding: 4px 0; }
+  .del { background: transparent; color: var(--danger); font-size: 18px; line-height: 1; padding: 4px 6px; }
+  .primary { width: 100%; background: var(--accent); color: var(--accent-text); padding: 12px; font-weight: 600; margin-top: 12px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .row > * { flex: 1 1 120px; }
+  .ex { display: flex; justify-content: space-between; align-items: center; background: var(--card); border-radius: 10px; padding: 8px 12px; margin-bottom: 6px; }
+  #msg { position: fixed; left: 16px; right: 16px; bottom: 16px; padding: 10px 14px; border-radius: 10px; background: var(--text); color: var(--bg);
+         opacity: 0; transition: opacity .2s; pointer-events: none; text-align: center; }
+  #msg.show { opacity: .92; }
+</style>
+</head>
+<body>
+<h1>Окна для записи</h1>
+<div class="hint" id="who">Загрузка…</div>
+
+<h2>Длительность урока</h2>
+<select id="duration">
+  <option value="45">45 минут</option>
+  <option value="60">60 минут</option>
+  <option value="90">90 минут</option>
+</select>
+
+<h2>Каждую неделю</h2>
+<div id="days"></div>
+<button class="primary" id="save">Сохранить окна</button>
+
+<h2>Отпуск и перерывы</h2>
+<div id="exceptions"></div>
+<div class="row">
+  <input type="date" id="exFrom" aria-label="С">
+  <input type="date" id="exTo" aria-label="По">
+</div>
+<div class="row" style="margin-top:8px">
+  <input type="text" id="exNote" placeholder="Причина (необязательно)" maxlength="100">
+  <button class="add" id="exAdd" style="flex:0 0 auto">+ Добавить</button>
+</div>
+<div id="msg"></div>
+
+<script>
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+const initData = tg ? tg.initData : "";
+const DAYS = [[1,"Понедельник"],[2,"Вторник"],[3,"Среда"],[4,"Четверг"],[5,"Пятница"],[6,"Суббота"],[0,"Воскресенье"]];
+let state = { windows: [], exceptions: [], lesson_minutes: 60 };
+
+function toast(text) {
+  const m = document.getElementById("msg");
+  m.textContent = text; m.classList.add("show");
+  clearTimeout(toast.t); toast.t = setTimeout(() => m.classList.remove("show"), 2500);
+}
+
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method, headers: { "Authorization": "tma " + initData, "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Ошибка " + res.status);
+  return data;
+}
+
+function render() {
+  document.getElementById("who").textContent = state.name ? state.name + " · время по вашему поясу" : "";
+  document.getElementById("duration").value = String(state.lesson_minutes);
+  const days = document.getElementById("days");
+  days.innerHTML = "";
+  for (const [wd, title] of DAYS) {
+    const box = document.createElement("div");
+    box.className = "day";
+    const head = document.createElement("div");
+    head.className = "day-head";
+    head.innerHTML = "<span></span>";
+    head.firstChild.textContent = title;
+    const add = document.createElement("button");
+    add.className = "add"; add.textContent = "+ окно";
+    add.onclick = () => { state.windows.push({ weekday: wd, start: "15:00", end: "19:00" }); render(); };
+    head.appendChild(add);
+    box.appendChild(head);
+    state.windows.forEach((w, i) => {
+      if (w.weekday !== wd) return;
+      const row = document.createElement("div");
+      row.className = "slot";
+      const s = document.createElement("input"); s.type = "time"; s.value = w.start; s.step = 300;
+      const e = document.createElement("input"); e.type = "time"; e.value = w.end; e.step = 300;
+      s.onchange = () => { w.start = s.value; };
+      e.onchange = () => { w.end = e.value; };
+      const dash = document.createElement("span"); dash.textContent = "—";
+      const del = document.createElement("button"); del.className = "del"; del.textContent = "×"; del.title = "Удалить";
+      del.onclick = () => { state.windows.splice(i, 1); render(); };
+      row.append(s, dash, e, del);
+      box.appendChild(row);
+    });
+    days.appendChild(box);
+  }
+  const ex = document.getElementById("exceptions");
+  ex.innerHTML = "";
+  if (!state.exceptions.length) {
+    ex.innerHTML = '<div class="hint" style="margin-bottom:8px">Нет запланированных перерывов</div>';
+  }
+  for (const x of state.exceptions) {
+    const row = document.createElement("div");
+    row.className = "ex";
+    const span = document.createElement("span");
+    const f = x.from.split("-").reverse().slice(0,2).join("."), t = x.to.split("-").reverse().slice(0,2).join(".");
+    span.textContent = (f === t ? f : f + "–" + t) + (x.note ? " · " + x.note : "");
+    const del = document.createElement("button"); del.className = "del"; del.textContent = "×";
+    del.onclick = async () => { try { state = await api("DELETE", "/api/exceptions/" + x.id); render(); } catch (e) { toast(e.message); } };
+    row.append(span, del);
+    ex.appendChild(row);
+  }
+}
+
+document.getElementById("save").onclick = async () => {
+  try { state = await api("PUT", "/api/windows", { windows: state.windows }); render(); toast("Сохранено ✓"); }
+  catch (e) { toast(e.message); }
+};
+document.getElementById("duration").onchange = async (ev) => {
+  try { state = await api("PUT", "/api/duration", { minutes: Number(ev.target.value) }); render(); toast("Длительность сохранена ✓"); }
+  catch (e) { toast(e.message); }
+};
+document.getElementById("exAdd").onclick = async () => {
+  const from = document.getElementById("exFrom").value;
+  const to = document.getElementById("exTo").value || from;
+  if (!from) { toast("Укажите дату начала"); return; }
+  try {
+    state = await api("POST", "/api/exceptions", { from, to, note: document.getElementById("exNote").value });
+    document.getElementById("exNote").value = "";
+    render(); toast("Добавлено ✓");
+  } catch (e) { toast(e.message); }
+};
+
+api("GET", "/api/schedule").then(d => { state = d; render(); }).catch(e => {
+  document.getElementById("who").textContent = e.message;
+});
+</script>
+</body>
+</html>
