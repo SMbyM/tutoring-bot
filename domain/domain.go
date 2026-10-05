@@ -145,3 +145,8 @@ var (
 	ErrInviteInvalid   = errors.New("приглашение недействительно или устарело")
 	ErrNoChildSelected = errors.New("сначала выберите ребёнка")
 )
+
+// InputError — ошибка во введённых пользователем данных; её текст можно показать пользователю.
+type InputError string
+
+func (e InputError) Error() string { return string(e) }

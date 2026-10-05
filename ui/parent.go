@@ -2,8 +2,8 @@ package ui
 
 import (
 	"fmt"
-	"time"
 
+	"github.com/SMbyM/tutoring-bot/core"
 	"github.com/SMbyM/tutoring-bot/msg"
 )
 
@@ -11,26 +11,19 @@ func (e *Engine) parentAction(r *req, p msg.Parsed) (bool, error) {
 	ctx, u := r.ctx, r.u
 	switch p.Name {
 	case "kid": // меню ребёнка
-		kidID := p.Int(0)
-		if err := e.App.CanActForStudent(ctx, u, kidID); err != nil {
-			return true, err
-		}
-		kid, err := e.S.UserByID(ctx, kidID)
-		if err != nil {
-			return true, err
-		}
-		st, err := e.S.Settings(ctx, kidID)
+		c, err := e.App.Child(ctx, u, p.Int(0))
 		if err != nil {
 			return true, err
 		}
 		mode := "свободно (ребёнок меняет сам)"
-		if st.RescheduleNeedsParent {
+		if c.NeedsApproval {
 			mode = "с моего подтверждения"
 		}
-		text := fmt.Sprintf("👤 %s, %d класс\nПеренос и отмена уроков ребёнком: %s", kid.Name, kid.Grade, mode)
-		if kid.ManagedBy != 0 {
+		text := fmt.Sprintf("👤 %s, %d класс\nПеренос и отмена уроков ребёнком: %s", c.Kid.Name, c.Kid.Grade, mode)
+		if c.Kid.ManagedBy != 0 {
 			text += "\nАккаунт без Telegram — уведомления приходят вам."
 		}
+		kidID := c.Kid.ID
 		r.screen(text,
 			msg.Row(msg.Btn("📅 Уроки", "ls", kidID), msg.Btn("➕ Записать", "nb", kidID)),
 			msg.Row(msg.Btn("💳 Оплата и баланс", "py", kidID)),
@@ -39,26 +32,17 @@ func (e *Engine) parentAction(r *req, p msg.Parsed) (bool, error) {
 		return true, nil
 
 	case "kpm": // режим переноса для ребёнка
-		kidID := p.Int(0)
-		if ok, err := e.S.IsParentOf(ctx, u.ID, kidID); err != nil || !ok {
-			return true, errNotParent
+		if err := e.App.ToggleChildApproval(ctx, u, p.Int(0)); err != nil {
+			return true, err
 		}
-		st, err := e.S.Settings(ctx, kidID)
+		return e.parentAction(r, msg.Parse(msg.Act("kid", p.Int(0))))
+
+	case "cinv": // родитель приглашает ребёнка с Telegram
+		payload, err := e.App.CreateInvite(ctx, u, core.InviteChild)
 		if err != nil {
 			return true, err
 		}
-		st.RescheduleNeedsParent = !st.RescheduleNeedsParent
-		if err := e.S.SaveSettings(ctx, kidID, st); err != nil {
-			return true, err
-		}
-		return e.parentAction(r, msg.Parse(msg.Act("kid", kidID)))
-
-	case "cinv": // родитель приглашает ребёнка с Telegram
-		code := newCode()
-		if err := e.S.CreateInvite(ctx, storeInvite(code, "child_link", u.ID), 7*24*time.Hour); err != nil {
-			return true, err
-		}
-		r.screen("Отправьте эту ссылку ребёнку — после перехода его аккаунт привяжется к вашему. Одноразовая, действует 7 дней:\n\n"+e.BotLink("c_"+code),
+		r.screen("Отправьте эту ссылку ребёнку — после перехода его аккаунт привяжется к вашему. Одноразовая, действует 7 дней:\n\n"+e.BotLink(payload),
 			msg.Row(msg.Btn("⬅️ Назад", "home")))
 		return true, nil
 
@@ -77,7 +61,7 @@ func (e *Engine) parentAction(r *req, p msg.Parsed) (bool, error) {
 		if state != "kidgrade" || data["name"] == "" {
 			return true, e.home(r)
 		}
-		id, err := e.S.CreateManagedChild(ctx, u.ID, data["name"], int(p.Int(0)))
+		id, err := e.App.AddManagedChild(ctx, u, data["name"], int(p.Int(0)))
 		if err != nil {
 			return true, err
 		}
@@ -88,5 +72,3 @@ func (e *Engine) parentAction(r *req, p msg.Parsed) (bool, error) {
 	}
 	return false, nil
 }
-
-var errNotParent = uerr(fmt.Errorf("это может сделать только родитель ребёнка"))

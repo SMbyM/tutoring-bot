@@ -8,40 +8,29 @@ import (
 	"github.com/SMbyM/tutoring-bot/core"
 	"github.com/SMbyM/tutoring-bot/domain"
 	"github.com/SMbyM/tutoring-bot/msg"
-	"github.com/SMbyM/tutoring-bot/store"
 )
-
-func storeInvite(code, kind string, by int64) store.Invite {
-	return store.Invite{Code: code, Kind: kind, CreatedBy: by}
-}
 
 func (e *Engine) lessonAction(r *req, p msg.Parsed) (bool, error) {
 	ctx, u := r.ctx, r.u
 	switch p.Name {
 	case "ls": // уроки ученика
 		studentID := p.Int(0)
-		if err := e.App.CanActForStudent(ctx, u, studentID); err != nil {
-			return true, err
-		}
-		ls, err := e.S.UpcomingForStudent(ctx, studentID, 12)
+		ls, err := e.App.StudentLessons(ctx, u, studentID, 12)
 		if err != nil {
 			return true, err
 		}
 		return true, e.lessonList(r, ls, true, false, msg.Row(msg.Btn("➕ Записаться", "nb", studentID), msg.Btn("⬅️ Назад", "home")))
 
 	case "tl": // уроки репетитора
-		ls, err := e.S.UpcomingForTutor(ctx, u.ID, 20)
+		ls, err := e.App.TutorLessons(ctx, u, 20)
 		if err != nil {
 			return true, err
 		}
 		return true, e.lessonList(r, ls, false, true, msg.Row(msg.Btn("⬅️ Назад", "home")))
 
 	case "lo": // карточка урока
-		l, err := e.S.Lesson(ctx, p.Int(0))
+		l, err := e.App.Lesson(ctx, u, p.Int(0))
 		if err != nil {
-			return true, err
-		}
-		if err := e.canSeeLesson(r, l); err != nil {
 			return true, err
 		}
 		var b strings.Builder
@@ -72,14 +61,11 @@ func (e *Engine) lessonAction(r *req, p msg.Parsed) (bool, error) {
 		return true, nil
 
 	case "rs": // перенос: выбор дня
-		l, err := e.S.Lesson(ctx, p.Int(0))
+		l, err := e.App.Lesson(ctx, u, p.Int(0))
 		if err != nil {
 			return true, err
 		}
-		if err := e.canSeeLesson(r, l); err != nil {
-			return true, err
-		}
-		slots, _, err := e.App.FreeSlots(ctx, l.TutorID, l.StudentID, l.ID)
+		slots, _, err := e.App.FreeSlots(ctx, u, l.TutorID, l.StudentID, l.ID)
 		if err != nil {
 			return true, err
 		}
@@ -94,11 +80,11 @@ func (e *Engine) lessonAction(r *req, p msg.Parsed) (bool, error) {
 		return true, nil
 
 	case "rd":
-		l, err := e.S.Lesson(ctx, p.Int(0))
+		l, err := e.App.Lesson(ctx, u, p.Int(0))
 		if err != nil {
 			return true, err
 		}
-		slots, _, err := e.App.FreeSlots(ctx, l.TutorID, l.StudentID, l.ID)
+		slots, _, err := e.App.FreeSlots(ctx, u, l.TutorID, l.StudentID, l.ID)
 		if err != nil {
 			return true, err
 		}
@@ -111,7 +97,7 @@ func (e *Engine) lessonAction(r *req, p msg.Parsed) (bool, error) {
 		return true, e.applyChange(r, p.Int(0), core.ChangeReschedule, time.Unix(p.Int(1), 0), "")
 
 	case "cx":
-		l, err := e.S.Lesson(ctx, p.Int(0))
+		l, err := e.App.Lesson(ctx, u, p.Int(0))
 		if err != nil {
 			return true, err
 		}
@@ -147,13 +133,6 @@ func (e *Engine) lessonAction(r *req, p msg.Parsed) (bool, error) {
 		return true, nil
 	}
 	return false, nil
-}
-
-func (e *Engine) canSeeLesson(r *req, l domain.Lesson) error {
-	if r.u.ID == l.TutorID || r.role == domain.RoleAdmin {
-		return nil
-	}
-	return e.App.CanActForStudent(r.ctx, r.u, l.StudentID)
 }
 
 func (e *Engine) lessonList(r *req, ls []domain.Lesson, withTutor, withStudent bool, footer []msg.Button) error {

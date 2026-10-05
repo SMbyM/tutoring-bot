@@ -1,13 +1,15 @@
 package ui
 
 import (
+	"github.com/SMbyM/tutoring-bot/core"
+	"github.com/SMbyM/tutoring-bot/domain"
 	"github.com/SMbyM/tutoring-bot/msg"
 )
 
 // settingsScreen — настройки уведомлений. При первой регистрации (onboarding) пользователю
 // показываются значения по умолчанию: каждое можно оставить или поменять одной кнопкой.
 func (e *Engine) settingsScreen(r *req, onboarding bool) error {
-	st, err := e.S.Settings(r.ctx, r.u.ID)
+	st, err := e.App.Settings(r.ctx, r.u)
 	if err != nil {
 		return err
 	}
@@ -16,11 +18,11 @@ func (e *Engine) settingsScreen(r *req, onboarding bool) error {
 		text = "Почти готово! Вот настройки по умолчанию — нажмите на пункт, чтобы изменить, или оставьте как есть:"
 	}
 	rows := [][]msg.Button{
-		msg.Row(msg.Btn("☀️ Утром в день урока: "+onOff(st.RemindMorning)+" — изменить", "stt", "m")),
+		msg.Row(msg.Btn("☀️ Утром в день урока: "+onOff(st.RemindMorning)+" — изменить", "stt", string(core.SettingMorning))),
 	}
 	// за час до урока напоминаем ученику и репетитору; родителю — только утреннее
-	if r.role != "parent" {
-		rows = append(rows, msg.Row(msg.Btn("⏰ За час до урока: "+onOff(st.RemindHour)+" — изменить", "stt", "h")))
+	if r.role != domain.RoleParent {
+		rows = append(rows, msg.Row(msg.Btn("⏰ За час до урока: "+onOff(st.RemindHour)+" — изменить", "stt", string(core.SettingHour))))
 	}
 	done := "✅ Готово"
 	if onboarding {
@@ -32,34 +34,26 @@ func (e *Engine) settingsScreen(r *req, onboarding bool) error {
 }
 
 func (e *Engine) settingsAction(r *req, p msg.Parsed) error {
-	st, err := e.S.Settings(r.ctx, r.u.ID)
-	if err != nil {
-		return err
-	}
 	switch p.Name {
 	case "st":
 		return e.settingsScreen(r, false)
 	case "stt":
-		switch p.Str(0) {
-		case "m":
-			st.RemindMorning = !st.RemindMorning
-		case "h":
-			st.RemindHour = !st.RemindHour
-		}
-		if err := e.S.SaveSettings(r.ctx, r.u.ID, st); err != nil {
+		st, err := e.App.ToggleSetting(r.ctx, r.u, core.SettingKey(p.Str(0)))
+		if err != nil {
 			return err
 		}
 		return e.settingsScreen(r, !st.Onboarded)
 	case "stok":
-		first := !st.Onboarded
-		st.Onboarded = true
-		if err := e.S.SaveSettings(r.ctx, r.u.ID, st); err != nil {
+		first, err := e.App.FinishOnboarding(r.ctx, r.u)
+		if err != nil {
+			return err
+		}
+		if err := e.mainMenu(r); err != nil {
 			return err
 		}
 		if first {
 			r.toast("Настройки сохранены")
 		}
-		return e.mainMenu(r)
 	}
 	return nil
 }

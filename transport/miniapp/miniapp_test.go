@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SMbyM/tutoring-bot/core"
 	"github.com/SMbyM/tutoring-bot/domain"
 	"github.com/SMbyM/tutoring-bot/store"
 )
@@ -83,7 +84,7 @@ func TestScheduleAPI(t *testing.T) {
 	if _, err := s.CreateUser(ctx, store.Identity{Provider: "tg", ExternalID: "77", ChatID: "77"}, "Петя", domain.RoleStudent); err != nil {
 		t.Fatal(err)
 	}
-	h := (&Server{S: s, BotToken: token}).Handler()
+	h := (&Server{App: core.New(s, core.Options{}), BotToken: token}).Handler()
 	call := func(tgID int64, method, path, body string) (int, map[string]any) {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
 		req.Header.Set("Authorization", "tma "+sign(tgID, time.Now()))

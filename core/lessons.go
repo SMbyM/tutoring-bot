@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/SMbyM/tutoring-bot/domain"
 	"github.com/SMbyM/tutoring-bot/msg"
@@ -79,24 +81,37 @@ func (a *App) onHeld(ctx context.Context, l domain.Lesson) {
 }
 
 // LeaveFeedback — отзыв о пробном. Видят родитель и админ; админ решает, передавать ли репетитору.
-func (a *App) LeaveFeedback(ctx context.Context, u domain.User, lessonID int64, liked bool) (int64, string, error) {
+// FeedbackResult — итог отзыва: что сказать ученику и что ему можно сделать дальше.
+type FeedbackResult struct {
+	ID        int64 // 0 — отзыв уже был оставлен раньше
+	Text      string
+	Liked     bool
+	TutorID   int64
+	SubjectID int
+	StudentID int64
+}
+
+func (a *App) LeaveFeedback(ctx context.Context, u domain.User, lessonID int64, liked bool) (FeedbackResult, error) {
 	l, err := a.S.Lesson(ctx, lessonID)
 	if err != nil {
-		return 0, "", err
+		return FeedbackResult{}, err
 	}
 	if l.Kind != domain.KindTrial || l.Status != domain.StatusHeld {
-		return 0, "", domain.ErrNotAllowed
+		return FeedbackResult{}, domain.ErrNotAllowed
 	}
 	if err := a.CanActForStudent(ctx, u, l.StudentID); err != nil {
-		return 0, "", err
+		return FeedbackResult{}, err
 	}
+	res := FeedbackResult{Liked: liked, TutorID: l.TutorID, SubjectID: l.SubjectID, StudentID: l.StudentID}
 	id, ok, err := a.S.InsertFeedback(ctx, l.ID, l.StudentID, l.TutorID, liked)
 	if err != nil {
-		return 0, "", err
+		return res, err
 	}
 	if !ok {
-		return 0, "Отзыв на этот урок уже оставлен.", nil
+		res.Text = "Отзыв на этот урок уже оставлен."
+		return res, nil
 	}
+	res.ID = id
 	verdict := map[bool]string{true: "👍 понравился", false: "👎 не понравился"}[liked]
 	text := fmt.Sprintf("Отзыв о пробном уроке: %s — репетитор %s (%s): %s", l.StudentName, l.TutorName, l.Subject, verdict)
 	var parents []int64
@@ -112,22 +127,36 @@ func (a *App) LeaveFeedback(ctx context.Context, u domain.User, lessonID int64, 
 		if err := a.SyncAccess(ctx, l.StudentID); err != nil {
 			a.Log.Warn("доступ в канал", "err", err)
 		}
-		return id, "Спасибо! Можно закрепиться за этим репетитором и записаться на постоянные занятия.", nil
+		res.Text = "Спасибо! Можно закрепиться за этим репетитором и записаться на постоянные занятия."
+		return res, nil
 	}
-	return id, "Спасибо за честный ответ! Можно попробовать другого репетитора.", nil
+	res.Text = "Спасибо за честный ответ! Можно попробовать другого репетитора."
+	return res, nil
 }
 
 // SetFeedbackComment — необязательный комментарий к отзыву (видят родители и админ).
-func (a *App) SetFeedbackComment(ctx context.Context, u domain.User, fbID int64, comment string) error {
+// Возвращает отзыв, чтобы адаптер мог предложить следующий шаг (например, закрепиться за репетитором).
+func (a *App) SetFeedbackComment(ctx context.Context, u domain.User, fbID int64, comment string) (FeedbackResult, error) {
 	f, err := a.S.Feedback(ctx, fbID)
 	if err != nil {
-		return err
+		return FeedbackResult{}, err
 	}
 	if err := a.CanActForStudent(ctx, u, f.StudentID); err != nil {
-		return err
+		return FeedbackResult{}, err
+	}
+	comment = strings.TrimSpace(comment)
+	if comment == "" {
+		return FeedbackResult{}, domain.InputError("комментарий пустой")
+	}
+	if utf8.RuneCountInString(comment) > 1000 {
+		comment = string([]rune(comment)[:1000])
 	}
 	if err := a.S.SetFeedbackComment(ctx, fbID, comment); err != nil {
-		return err
+		return FeedbackResult{}, err
+	}
+	l, err := a.S.Lesson(ctx, f.LessonID)
+	if err != nil {
+		return FeedbackResult{}, err
 	}
 	text := fmt.Sprintf("💬 Комментарий к отзыву %s о репетиторе %s:\n%s", f.StudentName, f.TutorName, comment)
 	var parents []int64
@@ -137,7 +166,7 @@ func (a *App) SetFeedbackComment(ctx context.Context, u domain.User, fbID int64,
 		}
 	}
 	a.NotifyMany(ctx, append(parents, a.adminIDs(ctx)...), msg.Text(text))
-	return nil
+	return FeedbackResult{ID: f.ID, Liked: f.Liked, TutorID: f.TutorID, SubjectID: l.SubjectID, StudentID: f.StudentID}, nil
 }
 
 // ForwardFeedback — админ сообщает репетитору итог пробного (без комментария ученика).

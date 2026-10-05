@@ -11,8 +11,14 @@ import (
 	"github.com/SMbyM/tutoring-bot/store"
 )
 
-// FreeSlots — свободные окна репетитора для ученика на горизонте записи.
-func (a *App) FreeSlots(ctx context.Context, tutorID, studentID int64, excludeLesson int64) ([]time.Time, store.Tutor, error) {
+// FreeSlots — свободные окна репетитора для ученика на горизонте записи (с учётом занятости обоих).
+// Смотреть может сам ученик, его родитель, админ или этот репетитор (например, для переноса).
+func (a *App) FreeSlots(ctx context.Context, u domain.User, tutorID, studentID int64, excludeLesson int64) ([]time.Time, store.Tutor, error) {
+	if u.ID != tutorID {
+		if err := a.CanActForStudent(ctx, u, studentID); err != nil {
+			return nil, store.Tutor{}, err
+		}
+	}
 	t, err := a.S.Tutor(ctx, tutorID)
 	if err != nil {
 		return nil, t, err
