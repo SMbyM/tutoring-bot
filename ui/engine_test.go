@@ -456,3 +456,15 @@ func TestForgedButtons(t *testing.T) {
 	kid.do(ui.Input{Action: "ls:999999"})
 	kid.sees("нет прав")
 }
+
+func TestMenuTitleKeepsCyrillicIntact(t *testing.T) {
+	w := newWorld(t, true)
+	admin := w.user("100", "Ольга")
+	admin.send("/start").click("Согласен").click("Оставить").click("Всё оставить")
+	admin.sees("Ольга, главное меню")
+	for _, m := range admin.last {
+		if strings.ContainsRune(m.Text, '�') {
+			t.Errorf("битый символ в тексте: %q", m.Text)
+		}
+	}
+}

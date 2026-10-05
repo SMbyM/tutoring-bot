@@ -158,11 +158,11 @@ func (e *Engine) applyChange(r *req, lessonID int64, kind core.ChangeKind, start
 	}
 	switch oc {
 	case core.NeedReason:
-		data := map[string]string{"lesson": fmt.Sprint(lessonID), "kind": string(kind)}
+		q := askReason{LessonID: lessonID, Kind: kind}
 		if !start.IsZero() {
-			data["start"] = fmt.Sprint(start.Unix())
+			q.Start = start.Unix()
 		}
-		if err := e.S.SetState(r.ctx, r.u.ID, "reason", data); err != nil {
+		if err := e.ask(r, q); err != nil {
 			return err
 		}
 		r.screen("До урока меньше 12 часов. Напишите коротко причину — её увидят репетитор и администратор.\n(/menu — передумать)")

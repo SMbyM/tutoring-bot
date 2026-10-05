@@ -47,6 +47,7 @@ func (e *Engine) debug() bool { return e.App.Opt.Debug }
 type req struct {
 	ctx      context.Context
 	e        *Engine
+	asked    bool // в этом запросе задан новый вопрос (см. dialog.go)
 	in       Input
 	u        domain.User
 	role     domain.Role
@@ -135,7 +136,7 @@ func (e *Engine) handle(r *req) error {
 	text := strings.TrimSpace(in.Text)
 	switch {
 	case strings.HasPrefix(text, "/start"):
-		_ = e.S.ClearState(ctx, u.ID)
+		_ = e.forget(r)
 		if arg := strings.TrimSpace(strings.TrimPrefix(text, "/start")); arg != "" {
 			if err := e.useInvite(r, arg); err != nil {
 				r.fail(err)
@@ -143,7 +144,7 @@ func (e *Engine) handle(r *req) error {
 		}
 		return e.home(r)
 	case text == "/menu" || text == "/cancel" || text == "Меню":
-		_ = e.S.ClearState(ctx, u.ID)
+		_ = e.forget(r)
 		return e.home(r)
 	case text == "/debug":
 		return e.debugMenu(r)
@@ -160,12 +161,8 @@ func (e *Engine) handle(r *req) error {
 		return e.action(r, a)
 	}
 	if text != "" {
-		state, data, err := e.S.State(ctx, u.ID)
-		if err != nil {
+		if handled, err := e.answer(r, text); handled || err != nil {
 			return err
-		}
-		if state != "" {
-			return e.onText(r, state, data, text)
 		}
 	}
 	return e.home(r)
@@ -223,7 +220,7 @@ func (e *Engine) home(r *req) error {
 }
 
 func (e *Engine) askName(r *req) error {
-	if err := e.S.SetState(r.ctx, r.u.ID, "name", nil); err != nil {
+	if err := e.ask(r, askName{}); err != nil {
 		return err
 	}
 	hint := ""
@@ -293,62 +290,11 @@ func (e *Engine) mainMenu(r *req) error {
 	if r.u.CanSwitchRoles(e.debug()) {
 		rows = append(rows, msg.Row(msg.Btn("🧪 Тест: роль «"+r.role.Title()+"»", actions.Debug{})))
 	}
-	who := r.u.Name
-	if who != "" {
-		title = who + ", " + strings.ToLower(title[:1]) + title[1:]
+	if who := r.u.Name; who != "" {
+		title = who + ", " + lowerFirst(title)
 	}
 	r.screen(title, rows...)
 	return nil
-}
-
-// onText — ответы на вопросы бота (имя, причина отмены и т.п.).
-func (e *Engine) onText(r *req, state string, data map[string]string, text string) error {
-	ctx, u := r.ctx, r.u
-	clear := func() error { return e.S.ClearState(ctx, u.ID) }
-	switch state {
-	case "name":
-		if err := e.App.SetName(ctx, u, text); err != nil {
-			return err
-		}
-		r.u.Name = strings.TrimSpace(text)
-		if err := clear(); err != nil {
-			return err
-		}
-		return e.home(r)
-	case "reason":
-		if err := clear(); err != nil {
-			return err
-		}
-		return e.applyChange(r, atoi64(data["lesson"]), core.ChangeKind(data["kind"]), unix(data["start"]), trim(text, 300))
-	case "fbcomment":
-		if err := clear(); err != nil {
-			return err
-		}
-		f, err := e.App.SetFeedbackComment(ctx, u, atoi64(data["fb"]), text)
-		if err != nil {
-			return err
-		}
-		rows := [][]msg.Button{msg.Row(msg.Btn("🏠 В меню", actions.Home{}))}
-		if f.Liked {
-			rows = append([][]msg.Button{msg.Row(msg.Btn("🤝 Заниматься у этого репетитора", actions.Enroll{TutorID: f.TutorID, SubjectID: f.SubjectID, StudentID: f.StudentID}))}, rows...)
-		}
-		r.send("Спасибо, комментарий передан.", rows...)
-		return nil
-	case "kidname":
-		if err := e.S.SetState(ctx, u.ID, "kidgrade", map[string]string{"name": trim(text, 60)}); err != nil {
-			return err
-		}
-		r.send("В каком классе "+trim(text, 60)+"?", gradeRows(func(g int) actions.Action { return actions.ChildGrade{Grade: g} })...)
-		return nil
-	}
-	if handled, err := e.tutorText(r, state, data, text); handled {
-		return err
-	}
-	if handled, err := e.adminText(r, state, data, text); handled {
-		return err
-	}
-	_ = clear()
-	return e.home(r)
 }
 
 // action — нажатия кнопок. Действия уже разобраны и проверены пакетом actions.
@@ -356,7 +302,7 @@ func (e *Engine) action(r *req, act actions.Action) error {
 	ctx, u := r.ctx, r.u
 	switch a := act.(type) {
 	case actions.Home:
-		_ = e.S.ClearState(ctx, u.ID)
+		_ = e.forget(r)
 		return e.home(r)
 	case actions.Consent:
 		if err := e.App.AcceptConsent(ctx, u); err != nil {
@@ -376,7 +322,7 @@ func (e *Engine) action(r *req, act actions.Action) error {
 			return err
 		}
 		r.u.Name = r.in.FirstName
-		_ = e.S.ClearState(ctx, u.ID)
+		_ = e.forget(r)
 		return e.home(r)
 	case actions.SetGrade:
 		if err := e.App.SetGrade(ctx, u, a.Grade); err != nil {

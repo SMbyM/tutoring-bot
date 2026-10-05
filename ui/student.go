@@ -224,7 +224,7 @@ func (e *Engine) studentAction(r *req, act actions.Action) (bool, error) {
 		return true, nil
 
 	case actions.FeedbackComment:
-		if err := e.S.SetState(ctx, u.ID, "fbcomment", map[string]string{"fb": fmt.Sprint(a.FeedbackID)}); err != nil {
+		if err := e.ask(r, askFeedbackComment{FeedbackID: a.FeedbackID}); err != nil {
 			return true, err
 		}
 		r.send("Напишите комментарий одним сообщением. Его увидят родители и администратор школы, репетитору он напрямую не передаётся.")

@@ -236,28 +236,23 @@ func (s *Store) UseInvite(ctx context.Context, code string) (Invite, error) {
 
 // ---- диалоговое состояние ----
 
-func (s *Store) State(ctx context.Context, userID int64) (string, map[string]string, error) {
+// State — незаданный вопрос пользователю: вид вопроса и его данные в JSON. ok=false — вопроса нет.
+func (s *Store) State(ctx context.Context, userID int64) (string, json.RawMessage, bool, error) {
 	var state string
 	var raw []byte
 	err := s.q.QueryRowContext(ctx, `SELECT state, data FROM user_states WHERE user_id=$1`, userID).Scan(&state, &raw)
 	if notFound(err) {
-		return "", nil, nil
+		return "", nil, false, nil
 	}
-	if err != nil {
-		return "", nil, err
-	}
-	data := map[string]string{}
-	_ = json.Unmarshal(raw, &data)
-	return state, data, nil
+	return state, raw, err == nil, err
 }
 
-func (s *Store) SetState(ctx context.Context, userID int64, state string, data map[string]string) error {
-	if data == nil {
-		data = map[string]string{}
+func (s *Store) SetState(ctx context.Context, userID int64, state string, data json.RawMessage) error {
+	if len(data) == 0 {
+		data = json.RawMessage("{}")
 	}
-	raw, _ := json.Marshal(data)
 	_, err := s.q.ExecContext(ctx, `INSERT INTO user_states(user_id, state, data, updated_at) VALUES ($1,$2,$3, now())
-		ON CONFLICT (user_id) DO UPDATE SET state=$2, data=$3, updated_at=now()`, userID, state, raw)
+		ON CONFLICT (user_id) DO UPDATE SET state=$2, data=$3, updated_at=now()`, userID, state, []byte(data))
 	return err
 }
 
